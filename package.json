@@ -1,0 +1,23 @@
+{
+    "name": "kfytube-monorepo",
+    "private": true,
+    "workspaces": [
+        "backend",
+        "frontend"
+    ],
+    "scripts": {
+        "start": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+        "start:backend": "cd backend && npm run dev",
+        "start:frontend": "cd frontend && npm run dev",
+        "deploy": "npm run deploy:backend && npm run deploy:frontend",
+        "deploy:backend": "cd backend && npx wrangler deploy",
+        "build:frontend": "cd frontend && npm run build",
+        "deploy:frontend": "cd frontend && npm run build && npx wrangler pages deploy dist",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "devDependencies": {
+        "concurrently": "^8.2.0",
+        "terser": "^5.44.1",
+        "wrangler": "^4.58.0"
+    }
+}

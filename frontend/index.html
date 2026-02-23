@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Tube App</title>
+
+  <!-- PWA Configuration for standalone app experience -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Tube App">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+  <!-- Disable all search engine indexing -->
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="googlebot" content="noindex, nofollow">
+  <meta name="bingbot" content="noindex, nofollow">
+  <script>
+    // Redirect from custom domain to pages.dev domain (frontend only)
+    // if (window.location.hostname === 'tube.twozao.com') {
+    //   window.location.replace('https://kfyapp.pages.dev' + window.location.pathname + window.location.search);
+    // }
+  </script>
+
+  <!-- TraqIt Analytics Tracker -->
+  <script async src="https://traqit.pages.dev/sdk.js" data-key="tq_0x85kV1xpJgd0JFkx0EkpVoZgZdpJIUI"></script>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+
+</html>

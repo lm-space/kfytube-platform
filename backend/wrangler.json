@@ -1,0 +1,27 @@
+{
+    "name": "kfytube",
+    "main": "src/index.ts",
+    "compatibility_date": "2024-02-08",
+    "routes": [
+        {
+            "pattern": "tube-api.twozao.com",
+            "custom_domain": true
+        }
+    ],
+    "d1_databases": [
+        {
+            "binding": "DB",
+            "database_name": "kfytube-db",
+            "database_id": "878ae6d1-0b8e-4824-a05b-9370eeee5a86"
+        }
+    ],
+    "triggers": {
+        "crons": ["* * * * *"]
+    },
+    "observability": {
+        "enabled": true
+    },
+    "ai": {
+        "binding": "AI"
+    }
+}
