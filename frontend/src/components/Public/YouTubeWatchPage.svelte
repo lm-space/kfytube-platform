@@ -63,19 +63,167 @@
     // YouTube IFrame Player API
     let ytPlayer: any = null;
 
+    // Player mode: 'custom' = our own controls, 'playU' = YouTube native embed
+    let playerMode: 'custom' | 'playU' = 'custom';
+    // Custom player state
+    let isPlaying = false;
+    let currentTime = 0;
+    let duration = 0;
+    let volume = 100;
+    let isMuted = false;
+    let isBuffering = false;
+    let progressInterval: ReturnType<typeof setInterval> | null = null;
+    let showControls = true;
+    let controlsTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isSeeking = false;
+    let seekBarElement: HTMLElement;
+
+    // Load saved player mode preference
+    function loadPlayerMode() {
+        try {
+            const saved = localStorage.getItem('kfytube_player_mode');
+            if (saved === 'playU' || saved === 'custom') {
+                playerMode = saved;
+            }
+        } catch (e) {}
+    }
+
+    function togglePlayerMode() {
+        playerMode = playerMode === 'custom' ? 'playU' : 'custom';
+        try { localStorage.setItem('kfytube_player_mode', playerMode); } catch (e) {}
+        // Reload with new mode
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('pm', playerMode);
+        window.location.href = currentUrl.toString();
+    }
+
+    function getCustomEmbedUrl(vid: any): string {
+        if (!vid) return "";
+        const ytId = vid.youtube_id || "";
+        const sourceType = vid.source_type || "youtube";
+        if (sourceType === "youtube" || !sourceType) {
+            // Custom mode: hide YT controls, enable JS API, disable annotations
+            return `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&controls=0&showinfo=0&iv_load_policy=3&disablekb=0&vq=hd1080&origin=${encodeURIComponent(window.location.origin)}`;
+        } else if (sourceType === "vimeo") {
+            return `https://player.vimeo.com/video/${ytId}?autoplay=1&quality=1080p`;
+        }
+        return ytId;
+    }
+
+    // Custom player control functions
+    function customTogglePlay() {
+        if (!ytPlayer) return;
+        try {
+            const state = ytPlayer.getPlayerState?.();
+            if (state === 1) { // playing
+                ytPlayer.pauseVideo();
+            } else {
+                ytPlayer.playVideo();
+            }
+        } catch (e) {}
+    }
+
+    function customSeek(e: MouseEvent) {
+        if (!ytPlayer || !seekBarElement) return;
+        const rect = seekBarElement.getBoundingClientRect();
+        const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const seekTo = fraction * duration;
+        try { ytPlayer.seekTo(seekTo, true); } catch (e) {}
+        currentTime = seekTo;
+    }
+
+    function customSetVolume(e: MouseEvent) {
+        const target = e.currentTarget as HTMLElement;
+        const rect = target.getBoundingClientRect();
+        const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        volume = Math.round(fraction * 100);
+        isMuted = volume === 0;
+        try {
+            ytPlayer?.setVolume?.(volume);
+            if (isMuted) ytPlayer?.mute?.(); else ytPlayer?.unMute?.();
+        } catch (e) {}
+    }
+
+    function customToggleMute() {
+        isMuted = !isMuted;
+        try {
+            if (isMuted) ytPlayer?.mute?.(); else ytPlayer?.unMute?.();
+        } catch (e) {}
+    }
+
+    function customToggleFullscreen() {
+        if (!playerWrapper) return;
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else {
+            playerWrapper.requestFullscreen?.();
+        }
+    }
+
+    function formatTime(seconds: number): string {
+        if (!seconds || isNaN(seconds)) return "0:00";
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        return `${m}:${String(s).padStart(2, '0')}`;
+    }
+
+    function startProgressTracking() {
+        if (progressInterval) clearInterval(progressInterval);
+        progressInterval = setInterval(() => {
+            if (!ytPlayer || isSeeking) return;
+            try {
+                currentTime = ytPlayer.getCurrentTime?.() || 0;
+                duration = ytPlayer.getDuration?.() || 0;
+            } catch (e) {}
+        }, 250);
+    }
+
+    function stopProgressTracking() {
+        if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+    }
+
+    function handlePlayerMouseMove() {
+        if (playerMode !== 'custom') return;
+        showControls = true;
+        if (controlsTimeout) clearTimeout(controlsTimeout);
+        controlsTimeout = setTimeout(() => {
+            if (isPlaying) showControls = false;
+        }, 3000);
+    }
+
+    function handlePlayerMouseLeave() {
+        if (playerMode !== 'custom') return;
+        if (controlsTimeout) clearTimeout(controlsTimeout);
+        if (isPlaying) {
+            controlsTimeout = setTimeout(() => { showControls = false; }, 1000);
+        }
+    }
+
     // Collapsible info section (description + comments) - always collapsed by default
     let infoCollapsed = true;
 
     onMount(async () => {
         console.warn('%c=== REPEAT MODE DEBUG START ===', 'background: #ff6b6b; color: white; font-size: 14px; font-weight: bold; padding: 5px;');
         console.warn('YouTubeWatchPage mounted');
+        loadPlayerMode();
+        // URL param override for player mode
+        const pmParam = new URLSearchParams(window.location.search).get('pm');
+        if (pmParam === 'playU' || pmParam === 'custom') {
+            playerMode = pmParam;
+            try { localStorage.setItem('kfytube_player_mode', playerMode); } catch (e) {}
+        }
         checkDevice();
         window.addEventListener("resize", checkDevice);
         window.addEventListener("scroll", handleWindowScroll);
 
         const params = new URLSearchParams(window.location.search);
         const videoId = params.get("id");
-        console.warn('Video ID:', videoId);
+        const urlRepeatCat = params.get("repeat_cat"); // Category ID for repeat mode
+        const urlRepeatPl = params.get("repeat_pl");   // Playlist ID for repeat mode
+        const urlRepeatIdx = params.get("ridx");        // Current index in repeat list
+        console.warn('Video ID:', videoId, '| Repeat context:', { urlRepeatCat, urlRepeatPl, urlRepeatIdx });
 
         if (!videoId) {
             window.location.href = "/youtube";
@@ -191,32 +339,66 @@
                     .filter((p: any) => p.is_featured)
                     .map((p: any) => ({ id: p.id, name: p.name, videos: [], loading: false, repeat_enabled: p.repeat_enabled }));
 
-                // Set default tab: match current video's category, else "Other Videos"
-                const currentCatTab = video?.category_id
-                    ? featuredCats.find(c => String(c.id) === String(video.category_id))
-                    : null;
-                if (currentCatTab) {
-                    activeRecTab = `cat_${currentCatTab.id}`;
-                    currentCategoryId = currentCatTab.id;
-                    currentCategoryRepeat = currentCatTab.repeat_enabled ?? false;
-                    // All videos already stored in repeatModeAllVideos during map()
-                } else if (otherVideos.length > 0) {
-                    activeRecTab = 'other';
+                // RESTORE repeat context from URL params (survives page navigation)
+                let repeatContextRestored = false;
+
+                if (urlRepeatCat) {
+                    const catId = parseInt(urlRepeatCat);
+                    const cat = featuredCats.find(c => c.id === catId);
+                    if (cat) {
+                        activeRecTab = `cat_${catId}`;
+                        currentCategoryId = catId;
+                        currentCategoryRepeat = true; // We know it's repeat because URL says so
+                        currentPlaylistId = null;
+                        currentPlaylistRepeat = false;
+                        repeatContextRestored = true;
+                        // Ensure repeatModeAllVideos is populated for this category
+                        if (!repeatModeAllVideos.has(`cat_${catId}`)) {
+                            const allCatVids = allVideosForRepeat.filter((v: any) => v.category_id === catId);
+                            repeatModeAllVideos.set(`cat_${catId}`, allCatVids);
+                            console.warn(`%c[REPEAT] Force-stored ${allCatVids.length} videos for cat_${catId} from URL restore`, 'background: #a29bfe; color: white; padding: 3px;');
+                        }
+                        console.warn(`%c[REPEAT] Restored category context from URL: cat=${catId}, idx=${urlRepeatIdx}`, 'background: #2ecc71; color: white; padding: 5px; font-weight: bold;');
+                    }
+                } else if (urlRepeatPl) {
+                    const plId = parseInt(urlRepeatPl);
+                    activeRecTab = `pl_${plId}`;
+                    currentPlaylistId = plId;
+                    currentPlaylistRepeat = true; // We know it's repeat because URL says so
                     currentCategoryId = null;
-                    currentPlaylistId = null;
                     currentCategoryRepeat = false;
-                    currentPlaylistRepeat = false;
-                } else if (channelVideos.length > 0) {
-                    activeRecTab = 'channel';
-                    currentCategoryId = null;
-                    currentPlaylistId = null;
-                    currentCategoryRepeat = false;
-                    currentPlaylistRepeat = false;
-                } else if (featuredCats.length > 0) {
-                    activeRecTab = `cat_${featuredCats[0].id}`;
-                    currentCategoryId = featuredCats[0].id;
-                    currentCategoryRepeat = featuredCats[0].repeat_enabled ?? false;
-                    // All videos already stored in repeatModeAllVideos during map()
+                    repeatContextRestored = true;
+                    // Trigger playlist video loading
+                    await loadPlaylistVideos(plId);
+                    console.warn(`%c[REPEAT] Restored playlist context from URL: pl=${plId}, idx=${urlRepeatIdx}`, 'background: #2ecc71; color: white; padding: 5px; font-weight: bold;');
+                }
+
+                if (!repeatContextRestored) {
+                    // Set default tab: match current video's category, else "Other Videos"
+                    const currentCatTab = video?.category_id
+                        ? featuredCats.find(c => String(c.id) === String(video.category_id))
+                        : null;
+                    if (currentCatTab) {
+                        activeRecTab = `cat_${currentCatTab.id}`;
+                        currentCategoryId = currentCatTab.id;
+                        currentCategoryRepeat = currentCatTab.repeat_enabled ?? false;
+                    } else if (otherVideos.length > 0) {
+                        activeRecTab = 'other';
+                        currentCategoryId = null;
+                        currentPlaylistId = null;
+                        currentCategoryRepeat = false;
+                        currentPlaylistRepeat = false;
+                    } else if (channelVideos.length > 0) {
+                        activeRecTab = 'channel';
+                        currentCategoryId = null;
+                        currentPlaylistId = null;
+                        currentCategoryRepeat = false;
+                        currentPlaylistRepeat = false;
+                    } else if (featuredCats.length > 0) {
+                        activeRecTab = `cat_${featuredCats[0].id}`;
+                        currentCategoryId = featuredCats[0].id;
+                        currentCategoryRepeat = featuredCats[0].repeat_enabled ?? false;
+                    }
                 }
 
                 // Store all filtered for the active tab
@@ -237,20 +419,35 @@
                     if (allVids && allVids.length > 0) {
                         repeatTotalVideos = allVids.length;
                         repeatVideosList = allVids;
-                        // Find current video position in the list (try multiple fields)
-                        const currentPos = findVideoIndex(allVids, video);
-                        repeatCurrentIndex = currentPos >= 0 ? currentPos + 1 : 1; // 1-indexed
-                        console.warn(`%c🔁 REPEAT MODE INITIALIZED: ${repeatCurrentIndex}/${repeatTotalVideos} videos (found at index ${currentPos})`, 'background: #4caf80; color: white; padding: 5px; font-weight: bold;');
+                        // Use URL index if available, otherwise find current video position
+                        if (urlRepeatIdx !== null) {
+                            repeatCurrentIndex = parseInt(urlRepeatIdx);
+                            // Clamp to valid range
+                            if (repeatCurrentIndex < 0 || repeatCurrentIndex >= allVids.length) {
+                                repeatCurrentIndex = 0;
+                            }
+                        } else {
+                            const currentPos = findVideoIndex(allVids, video);
+                            repeatCurrentIndex = currentPos >= 0 ? currentPos : 0;
+                        }
+                        console.warn(`%c🔁 REPEAT MODE INITIALIZED: index ${repeatCurrentIndex}/${repeatTotalVideos} videos (from URL: ${urlRepeatIdx !== null})`, 'background: #4caf80; color: white; padding: 5px; font-weight: bold;');
                     }
                 } else if (currentPlaylistRepeat && currentPlaylistId !== null) {
                     const allVids = repeatModeAllVideos.get(`pl_${currentPlaylistId}`);
                     if (allVids && allVids.length > 0) {
                         repeatTotalVideos = allVids.length;
                         repeatVideosList = allVids;
-                        // Find current video position in the list (try multiple fields)
-                        const currentPos = findVideoIndex(allVids, video);
-                        repeatCurrentIndex = currentPos >= 0 ? currentPos + 1 : 1; // 1-indexed
-                        console.warn(`%c🔁 REPEAT MODE INITIALIZED: ${repeatCurrentIndex}/${repeatTotalVideos} videos (found at index ${currentPos})`, 'background: #4caf80; color: white; padding: 5px; font-weight: bold;');
+                        // Use URL index if available, otherwise find current video position
+                        if (urlRepeatIdx !== null) {
+                            repeatCurrentIndex = parseInt(urlRepeatIdx);
+                            if (repeatCurrentIndex < 0 || repeatCurrentIndex >= allVids.length) {
+                                repeatCurrentIndex = 0;
+                            }
+                        } else {
+                            const currentPos = findVideoIndex(allVids, video);
+                            repeatCurrentIndex = currentPos >= 0 ? currentPos : 0;
+                        }
+                        console.warn(`%c🔁 REPEAT MODE INITIALIZED: index ${repeatCurrentIndex}/${repeatTotalVideos} videos (from URL: ${urlRepeatIdx !== null})`, 'background: #4caf80; color: white; padding: 5px; font-weight: bold;');
                     }
                 }
 
@@ -280,6 +477,8 @@
             window.removeEventListener("resize", checkDevice);
             window.removeEventListener("scroll", handleWindowScroll);
             if (autoPlayTimer) clearInterval(autoPlayTimer);
+            stopProgressTracking();
+            if (controlsTimeout) clearTimeout(controlsTimeout);
         };
     });
 
@@ -396,8 +595,22 @@
         window.location.href = "/youtube";
     }
 
-    function openVideo(vid: any) {
-        window.location.href = `/yt-watch?id=${vid.id}`;
+    function openVideo(vid: any, overrideIdx?: number) {
+        // Build URL with repeat context so state survives page navigation
+        let url = `/yt-watch?id=${vid.id}`;
+
+        // Pass repeat mode context through URL params
+        if (currentCategoryRepeat && currentCategoryId !== null) {
+            const allVids = repeatModeAllVideos.get(`cat_${currentCategoryId}`);
+            const idx = overrideIdx ?? (allVids ? allVids.findIndex(v => v.id === vid.id || v.id == vid.id) : -1);
+            url += `&repeat_cat=${currentCategoryId}&ridx=${idx >= 0 ? idx : 0}`;
+        } else if (currentPlaylistRepeat && currentPlaylistId !== null) {
+            const allVids = repeatModeAllVideos.get(`pl_${currentPlaylistId}`);
+            const idx = overrideIdx ?? (allVids ? allVids.findIndex(v => v.id === vid.id || v.id == vid.id) : -1);
+            url += `&repeat_pl=${currentPlaylistId}&ridx=${idx >= 0 ? idx : 0}`;
+        }
+
+        window.location.href = url;
     }
 
     function getVideoEmbedUrl(vid: any): string {
@@ -441,8 +654,10 @@
                 const allVids = Array.isArray(data) ? data : data.items || [];
 
                 // For repeat mode: store ALL videos (don't limit, don't filter)
-                if (pl.repeat_enabled) {
+                // Also store if we know from URL params that this playlist is in repeat mode
+                if (pl.repeat_enabled || (currentPlaylistRepeat && currentPlaylistId === playlistId)) {
                     repeatModeAllVideos.set(`pl_${playlistId}`, allVids);
+                    console.warn(`%c[REPEAT] Stored ${allVids.length} videos for playlist ${playlistId}`, 'background: #a29bfe; color: white; padding: 3px;');
                 }
 
                 // For display: filter out current video and show first 20
@@ -568,6 +783,7 @@
             ytPlayer = new (window as any).YT.Player(iframe.id, {
                 events: {
                     onStateChange: onYTStateChange,
+                    onReady: onYTReady,
                 }
             });
         } catch (e) {
@@ -575,9 +791,43 @@
         }
     }
 
+    function onYTReady(event: any) {
+        if (playerMode === 'custom') {
+            try {
+                duration = ytPlayer?.getDuration?.() || 0;
+                volume = ytPlayer?.getVolume?.() || 100;
+                isMuted = ytPlayer?.isMuted?.() || false;
+            } catch (e) {}
+            startProgressTracking();
+        }
+    }
+
     function onYTStateChange(event: any) {
         const state = event.data;
-        if (state === 0) { // ended - wait 1 second then trigger autoplay
+
+        // Update custom player state
+        if (playerMode === 'custom') {
+            isPlaying = state === 1;
+            isBuffering = state === 3;
+            if (state === 1) { // playing
+                startProgressTracking();
+                // Auto-hide controls after 3s
+                if (controlsTimeout) clearTimeout(controlsTimeout);
+                controlsTimeout = setTimeout(() => { showControls = false; }, 3000);
+            } else {
+                showControls = true;
+            }
+            if (state === 1 && duration === 0) {
+                try { duration = ytPlayer?.getDuration?.() || 0; } catch (e) {}
+            }
+        }
+
+        if (state === 0) { // ended
+            if (playerMode === 'custom') {
+                isPlaying = false;
+                showControls = true;
+                stopProgressTracking();
+            }
             if (!videoEnded) {
                 setTimeout(() => onVideoEnding(), 1000);
             }
@@ -588,74 +838,35 @@
     let nextAutoplayVideo: any = null;
 
     function pickNextAutoplayVideo(): any {
-        // REPEAT MODE: If in a category/playlist with repeat enabled, loop through ALL videos sequentially
+        // REPEAT MODE: Use index-based sequential advancement (survives page navigation)
+        // The key insight: repeatCurrentIndex tracks our position in the list via URL params
         if (currentCategoryRepeat && currentCategoryId !== null) {
             const allVids = repeatModeAllVideos.get(`cat_${currentCategoryId}`);
             if (allVids && allVids.length > 0) {
-                // Update UI tracking
                 repeatTotalVideos = allVids.length;
                 repeatVideosList = allVids;
 
-                // Find next unplayed video in sequential order
-                for (let i = 0; i < allVids.length; i++) {
-                    const v = allVids[i];
-                    if (v.id !== video?.id && !repeatModePlayedVideos.has(v.id)) {
-                        repeatModePlayedVideos.add(v.id);
-                        repeatCurrentIndex = repeatModePlayedVideos.size;
-                        console.warn(`%c[REPEAT] Now playing: ${repeatCurrentIndex}/${repeatTotalVideos}`, 'background: #ffa502; color: white; padding: 5px; font-weight: bold;');
-                        return v;
-                    }
-                }
-                // All videos have been played, reset and start from beginning
-                if (allVids.length > 0) {
-                    console.log(`[REPEAT] All videos played! Resetting. Total videos: ${allVids.length}`);
-                    repeatModePlayedVideos.clear();
-                    // Return first video that's not current
-                    const first = allVids.find(v => v.id !== video?.id);
-                    if (first) {
-                        repeatModePlayedVideos.add(first.id);
-                        console.log(`[REPEAT] Looping back to first video: ${first.id} (${first.title})`);
-                        return first;
-                    }
-                    // Fallback: if only 1 video, still loop it
-                    console.log(`[REPEAT] Only 1 video in repeat list, looping`);
-                    return allVids[0];
-                }
+                // Use current index to find the NEXT video (wrapping around)
+                const nextIdx = (repeatCurrentIndex + 1) % allVids.length;
+                const nextVid = allVids[nextIdx];
+                console.warn(`%c[REPEAT] Category ${currentCategoryId}: advancing ${repeatCurrentIndex} → ${nextIdx} of ${allVids.length}`, 'background: #ffa502; color: white; padding: 5px; font-weight: bold;');
+                repeatCurrentIndex = nextIdx;
+                return nextVid;
             }
         }
 
         if (currentPlaylistRepeat && currentPlaylistId !== null) {
             const allVids = repeatModeAllVideos.get(`pl_${currentPlaylistId}`);
             if (allVids && allVids.length > 0) {
-                // Update UI tracking
                 repeatTotalVideos = allVids.length;
                 repeatVideosList = allVids;
 
-                // Find next unplayed video in sequential order
-                for (let i = 0; i < allVids.length; i++) {
-                    const v = allVids[i];
-                    if (v.id !== video?.id && !repeatModePlayedVideos.has(v.id)) {
-                        repeatModePlayedVideos.add(v.id);
-                        repeatCurrentIndex = repeatModePlayedVideos.size;
-                        console.warn(`%c[REPEAT] Now playing: ${repeatCurrentIndex}/${repeatTotalVideos}`, 'background: #ffa502; color: white; padding: 5px; font-weight: bold;');
-                        return v;
-                    }
-                }
-                // All videos have been played, reset and start from beginning
-                if (allVids.length > 0) {
-                    console.log(`[REPEAT] All videos played! Resetting. Total videos: ${allVids.length}`);
-                    repeatModePlayedVideos.clear();
-                    // Return first video that's not current
-                    const first = allVids.find(v => v.id !== video?.id);
-                    if (first) {
-                        repeatModePlayedVideos.add(first.id);
-                        console.log(`[REPEAT] Looping back to first video: ${first.id} (${first.title})`);
-                        return first;
-                    }
-                    // Fallback: if only 1 video, still loop it
-                    console.log(`[REPEAT] Only 1 video in repeat list, looping`);
-                    return allVids[0];
-                }
+                // Use current index to find the NEXT video (wrapping around)
+                const nextIdx = (repeatCurrentIndex + 1) % allVids.length;
+                const nextVid = allVids[nextIdx];
+                console.warn(`%c[REPEAT] Playlist ${currentPlaylistId}: advancing ${repeatCurrentIndex} → ${nextIdx} of ${allVids.length}`, 'background: #ffa502; color: white; padding: 5px; font-weight: bold;');
+                repeatCurrentIndex = nextIdx;
+                return nextVid;
             }
         }
 
@@ -742,16 +953,12 @@
     }
 
     function jumpToNextQueueVideo() {
-        if (repeatCurrentIndex < repeatTotalVideos) {
-            const nextVid = repeatVideosList[repeatCurrentIndex];
+        if (repeatVideosList.length > 0) {
+            const nextIdx = (repeatCurrentIndex + 1) % repeatVideosList.length;
+            const nextVid = repeatVideosList[nextIdx];
             if (nextVid) {
-                // Mark current video as played
-                if (video?.id) {
-                    repeatModePlayedVideos.add(video.id);
-                }
-                // Close modal and navigate to next video
                 showRepeatModal = false;
-                openVideo(nextVid);
+                openVideo(nextVid, nextIdx);
             }
         }
     }
@@ -780,45 +987,161 @@
         <div class="watch-content">
             <!-- Main video section -->
             <div class="video-section">
+                <!-- Player Mode Toggle -->
+                <div class="player-mode-toggle">
+                    <button class="mode-btn" class:active={playerMode === 'custom'} on:click={() => { if (playerMode !== 'custom') togglePlayerMode(); }} title="Custom Player">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zM9.5 7.5v9l7-4.5z"/></svg>
+                        <span>KFY Player</span>
+                    </button>
+                    <button class="mode-btn" class:active={playerMode === 'playU'} on:click={() => { if (playerMode !== 'playU') togglePlayerMode(); }} title="YouTube Player">
+                        <svg viewBox="0 0 28 20" width="18" height="13"><path fill={playerMode === 'playU' ? '#FF0000' : 'currentColor'} d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/><path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/></svg>
+                        <span>playU</span>
+                    </button>
+                </div>
+
                 <!-- Player -->
-                <div class="player-wrapper" bind:this={playerWrapper}>
-                    <iframe
-                        src={getVideoEmbedUrl(video)}
-                        frameborder="0"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        referrerpolicy="strict-origin-when-cross-origin"
-                        allowfullscreen
-                        title={video.title}
-                    ></iframe>
-                    <!-- Click blocker for top area (title/channel info) -->
-                    <div class="yt-top-blocker"></div>
-                    <!-- Click blocker for YouTube logo (bottom right, leaves fullscreen accessible) -->
-                    <div class="yt-logo-blocker"></div>
-                    <!-- Double-tap zones on left and right sides for fullscreen toggle -->
-                    <div class="fullscreen-tap-left" on:dblclick={toggleFullscreen}></div>
-                    <div class="fullscreen-tap-right" on:dblclick={toggleFullscreen}></div>
+                <div class="player-wrapper" class:custom-mode={playerMode === 'custom'} bind:this={playerWrapper}
+                     on:mousemove={handlePlayerMouseMove} on:mouseleave={handlePlayerMouseLeave}>
+                    {#if playerMode === 'custom'}
+                        <!-- Custom Player Mode: YT iframe with controls=0 + our controls -->
+                        <iframe
+                            src={getCustomEmbedUrl(video)}
+                            frameborder="0"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                            referrerpolicy="strict-origin-when-cross-origin"
+                            allowfullscreen
+                            title={video.title}
+                        ></iframe>
 
-                    <!-- Player controls overlay (visible on hover) -->
-                    <div class="player-controls-overlay">
-                        <button class="ctrl-btn ctrl-home" on:click={goBack} title="Home">
-                            <svg viewBox="0 0 28 20" width="28" height="20">
-                                <path fill="#FF0000" d="M27.9727 3.12324C27.6435 1.89323 26.6768 0.926623 25.4468 0.597366C23.2197 0 14.285 0 14.285 0C14.285 0 5.35042 0 3.12323 0.597366C1.89323 0.926623 0.926623 1.89323 0.597366 3.12324C0 5.35042 0 10 0 10C0 10 0 14.6496 0.597366 16.8768C0.926623 18.1068 1.89323 19.0734 3.12323 19.4026C5.35042 20 14.285 20 14.285 20C14.285 20 23.2197 20 25.4468 19.4026C26.6768 19.0734 27.6435 18.1068 27.9727 16.8768C28.5701 14.6496 28.5701 10 28.5701 10C28.5701 10 28.5677 5.35042 27.9727 3.12324Z"/>
-                                <path fill="white" d="M11.4253 14.2854L18.8477 10.0004L11.4253 5.71533V14.2854Z"/>
-                            </svg>
-                        </button>
-                        <button class="ctrl-btn ctrl-prev" on:click={playPreviousVideo} title="Previous video">
-                            <svg viewBox="0 0 24 24" width="24" height="24">
-                                <path fill="currentColor" d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z"/>
-                            </svg>
-                        </button>
-                        <button class="ctrl-btn ctrl-next" on:click={playNextNow} title="Next video">
-                            <svg viewBox="0 0 24 24" width="24" height="24">
-                                <path fill="currentColor" d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
-                            </svg>
-                        </button>
-                    </div>
+                        <!-- Click area for play/pause -->
+                        <div class="custom-click-area" on:click={customTogglePlay} on:dblclick={customToggleFullscreen}></div>
 
-                    <!-- Video ending overlay -->
+                        <!-- Buffering spinner -->
+                        {#if isBuffering}
+                            <div class="custom-buffering">
+                                <div class="custom-spinner"></div>
+                            </div>
+                        {/if}
+
+                        <!-- Big play button when paused -->
+                        {#if !isPlaying && !videoEnded && !isBuffering}
+                            <div class="custom-big-play" on:click={customTogglePlay}>
+                                <svg viewBox="0 0 68 48" width="68" height="48">
+                                    <path fill="rgba(0,0,0,0.7)" d="M66.52 7.74C65.78 4.67 63.5 2.3 60.56 1.5 55.32 0 34 0 34 0S12.68 0 7.44 1.5C4.5 2.3 2.22 4.67 1.48 7.74 0 13.43 0 24 0 24s0 10.57 1.48 16.26C2.22 43.33 4.5 45.7 7.44 46.5 12.68 48 34 48 34 48s21.32 0 26.56-1.5c2.94-.8 5.22-3.17 5.96-6.24C68 34.57 68 24 68 24s0-10.57-1.48-16.26z"/>
+                                    <path fill="#fff" d="M45 24L27 14v20z"/>
+                                </svg>
+                            </div>
+                        {/if}
+
+                        <!-- Custom Controls Bar -->
+                        <div class="custom-controls" class:visible={showControls || !isPlaying}>
+                            <!-- Progress bar -->
+                            <div class="custom-progress-bar" bind:this={seekBarElement} on:click={customSeek}>
+                                <div class="custom-progress-buffered" style="width: {duration > 0 ? (currentTime / duration * 100) : 0}%"></div>
+                                <div class="custom-progress-played" style="width: {duration > 0 ? (currentTime / duration * 100) : 0}%">
+                                    <div class="custom-progress-thumb"></div>
+                                </div>
+                            </div>
+
+                            <div class="custom-controls-row">
+                                <!-- Left controls -->
+                                <div class="custom-controls-left">
+                                    <!-- Play/Pause -->
+                                    <button class="custom-ctrl-btn" on:click={customTogglePlay} title={isPlaying ? 'Pause' : 'Play'}>
+                                        {#if isPlaying}
+                                            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="white" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                                        {:else}
+                                            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="white" d="M8 5v14l11-7z"/></svg>
+                                        {/if}
+                                    </button>
+
+                                    <!-- Previous -->
+                                    <button class="custom-ctrl-btn" on:click={playPreviousVideo} title="Previous">
+                                        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="white" d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+                                    </button>
+
+                                    <!-- Next -->
+                                    <button class="custom-ctrl-btn" on:click={playNextNow} title="Next">
+                                        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="white" d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                                    </button>
+
+                                    <!-- Volume -->
+                                    <button class="custom-ctrl-btn" on:click={customToggleMute} title={isMuted ? 'Unmute' : 'Mute'}>
+                                        {#if isMuted || volume === 0}
+                                            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="white" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                                        {:else if volume < 50}
+                                            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="white" d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/></svg>
+                                        {:else}
+                                            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="white" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                                        {/if}
+                                    </button>
+
+                                    <!-- Volume slider -->
+                                    <div class="custom-volume-slider" on:click={customSetVolume}>
+                                        <div class="custom-volume-level" style="width: {isMuted ? 0 : volume}%"></div>
+                                    </div>
+
+                                    <!-- Time -->
+                                    <span class="custom-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
+                                </div>
+
+                                <!-- Right controls -->
+                                <div class="custom-controls-right">
+                                    <!-- Home -->
+                                    <button class="custom-ctrl-btn" on:click={goBack} title="Home">
+                                        <svg viewBox="0 0 28 20" width="22" height="16">
+                                            <path fill="#FF0000" d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/>
+                                            <path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/>
+                                        </svg>
+                                    </button>
+
+                                    <!-- Fullscreen -->
+                                    <button class="custom-ctrl-btn" on:click={customToggleFullscreen} title="Fullscreen">
+                                        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="white" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    {:else}
+                        <!-- playU Mode: YouTube native embed (original behavior) -->
+                        <iframe
+                            src={getVideoEmbedUrl(video)}
+                            frameborder="0"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                            referrerpolicy="strict-origin-when-cross-origin"
+                            allowfullscreen
+                            title={video.title}
+                        ></iframe>
+                        <!-- Click blocker for top area (title/channel info) -->
+                        <div class="yt-top-blocker"></div>
+                        <!-- Click blocker for YouTube logo (bottom right, leaves fullscreen accessible) -->
+                        <div class="yt-logo-blocker"></div>
+                        <!-- Double-tap zones on left and right sides for fullscreen toggle -->
+                        <div class="fullscreen-tap-left" on:dblclick={toggleFullscreen}></div>
+                        <div class="fullscreen-tap-right" on:dblclick={toggleFullscreen}></div>
+
+                        <!-- Player controls overlay (visible on hover) -->
+                        <div class="player-controls-overlay">
+                            <button class="ctrl-btn ctrl-home" on:click={goBack} title="Home">
+                                <svg viewBox="0 0 28 20" width="28" height="20">
+                                    <path fill="#FF0000" d="M27.9727 3.12324C27.6435 1.89323 26.6768 0.926623 25.4468 0.597366C23.2197 0 14.285 0 14.285 0C14.285 0 5.35042 0 3.12323 0.597366C1.89323 0.926623 0.926623 1.89323 0.597366 3.12324C0 5.35042 0 10 0 10C0 10 0 14.6496 0.597366 16.8768C0.926623 18.1068 1.89323 19.0734 3.12323 19.4026C5.35042 20 14.285 20 14.285 20C14.285 20 23.2197 20 25.4468 19.4026C26.6768 19.0734 27.6435 18.1068 27.9727 16.8768C28.5701 14.6496 28.5701 10 28.5701 10C28.5701 10 28.5677 5.35042 27.9727 3.12324Z"/>
+                                    <path fill="white" d="M11.4253 14.2854L18.8477 10.0004L11.4253 5.71533V14.2854Z"/>
+                                </svg>
+                            </button>
+                            <button class="ctrl-btn ctrl-prev" on:click={playPreviousVideo} title="Previous video">
+                                <svg viewBox="0 0 24 24" width="24" height="24">
+                                    <path fill="currentColor" d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z"/>
+                                </svg>
+                            </button>
+                            <button class="ctrl-btn ctrl-next" on:click={playNextNow} title="Next video">
+                                <svg viewBox="0 0 24 24" width="24" height="24">
+                                    <path fill="currentColor" d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    {/if}
+
+                    <!-- Video ending overlay (both modes) -->
                     {#if videoEnded}
                         <div class="autoplay-overlay">
                             {#if autoPlayEnabled && !autoPlayCancelled && nextAutoplayVideo}
@@ -2315,5 +2638,370 @@
 
     .yt-watch.tv .rec-video-title {
         font-size: 16px;
+    }
+
+    /* ===== PLAYER MODE TOGGLE ===== */
+    .player-mode-toggle {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 8px;
+        background: #1a1a1a;
+        border-radius: 8px;
+        padding: 3px;
+        width: fit-content;
+    }
+
+    .mode-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: #888;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+    }
+
+    .mode-btn:hover {
+        color: #ccc;
+        background: rgba(255,255,255,0.05);
+    }
+
+    .mode-btn.active {
+        background: #272727;
+        color: #fff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    .mode-btn svg {
+        flex-shrink: 0;
+    }
+
+    /* ===== CUSTOM PLAYER MODE ===== */
+    .player-wrapper.custom-mode {
+        position: relative;
+        cursor: default;
+    }
+
+    .player-wrapper.custom-mode iframe {
+        pointer-events: none;
+    }
+
+    .custom-click-area {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: calc(100% - 50px);
+        z-index: 5;
+        cursor: pointer;
+    }
+
+    /* Buffering spinner */
+    .custom-buffering {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.3);
+        z-index: 8;
+    }
+
+    .custom-spinner {
+        width: 48px;
+        height: 48px;
+        border: 3px solid rgba(255,255,255,0.2);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: custom-spin 0.8s linear infinite;
+    }
+
+    @keyframes custom-spin {
+        to { transform: rotate(360deg); }
+    }
+
+    /* Big play button (center) */
+    .custom-big-play {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 68px;
+        height: 68px;
+        background: rgba(0,0,0,0.6);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        z-index: 7;
+        transition: transform 0.15s ease, background 0.15s ease;
+    }
+
+    .custom-big-play:hover {
+        transform: translate(-50%, -50%) scale(1.1);
+        background: rgba(0,0,0,0.8);
+    }
+
+    .custom-big-play svg {
+        margin-left: 4px;
+    }
+
+    /* ===== CUSTOM CONTROLS BAR ===== */
+    .custom-controls {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background: linear-gradient(transparent, rgba(0,0,0,0.85));
+        padding: 16px 12px 8px;
+        z-index: 10;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+        pointer-events: none;
+    }
+
+    .custom-controls.visible {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    /* Progress bar */
+    .custom-progress-bar {
+        width: 100%;
+        height: 4px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 2px;
+        cursor: pointer;
+        position: relative;
+        margin-bottom: 8px;
+        transition: height 0.1s ease;
+    }
+
+    .custom-progress-bar:hover {
+        height: 6px;
+    }
+
+    .custom-progress-buffered {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background: rgba(255,255,255,0.3);
+        border-radius: 2px;
+        pointer-events: none;
+    }
+
+    .custom-progress-played {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background: #ff0000;
+        border-radius: 2px;
+        pointer-events: none;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+    }
+
+    .custom-progress-thumb {
+        width: 12px;
+        height: 12px;
+        background: #ff0000;
+        border-radius: 50%;
+        position: absolute;
+        right: -6px;
+        top: 50%;
+        transform: translateY(-50%);
+        opacity: 0;
+        transition: opacity 0.15s ease;
+    }
+
+    .custom-progress-bar:hover .custom-progress-thumb {
+        opacity: 1;
+    }
+
+    /* Controls row */
+    .custom-controls-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .custom-controls-left {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .custom-controls-right {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    /* Control buttons */
+    .custom-ctrl-btn {
+        background: none;
+        border: none;
+        color: #fff;
+        cursor: pointer;
+        padding: 6px;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s ease;
+        opacity: 0.9;
+    }
+
+    .custom-ctrl-btn:hover {
+        background: rgba(255,255,255,0.1);
+        opacity: 1;
+    }
+
+    /* Volume slider */
+    .custom-volume-slider {
+        width: 60px;
+        height: 4px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 2px;
+        cursor: pointer;
+        position: relative;
+        margin-left: 2px;
+    }
+
+    .custom-volume-level {
+        height: 100%;
+        background: #fff;
+        border-radius: 2px;
+        pointer-events: none;
+        transition: width 0.1s ease;
+    }
+
+    /* Time display */
+    .custom-time {
+        color: rgba(255,255,255,0.85);
+        font-size: 12px;
+        font-family: 'Roboto', sans-serif;
+        margin-left: 8px;
+        white-space: nowrap;
+        user-select: none;
+    }
+
+    /* ===== RESPONSIVE: Mobile custom controls ===== */
+    .yt-watch.mobile .player-mode-toggle {
+        margin-bottom: 6px;
+    }
+
+    .yt-watch.mobile .mode-btn {
+        padding: 5px 10px;
+        font-size: 11px;
+    }
+
+    .yt-watch.mobile .custom-controls {
+        padding: 12px 8px 6px;
+    }
+
+    .yt-watch.mobile .custom-ctrl-btn {
+        padding: 4px;
+    }
+
+    .yt-watch.mobile .custom-ctrl-btn svg {
+        width: 18px;
+        height: 18px;
+    }
+
+    .yt-watch.mobile .custom-volume-slider {
+        width: 40px;
+    }
+
+    .yt-watch.mobile .custom-time {
+        font-size: 10px;
+    }
+
+    .yt-watch.mobile .custom-big-play {
+        width: 54px;
+        height: 54px;
+    }
+
+    .yt-watch.mobile .custom-big-play svg {
+        width: 28px;
+        height: 28px;
+    }
+
+    /* ===== RESPONSIVE: Tablet custom controls ===== */
+    .yt-watch.tablet .player-mode-toggle {
+        margin-bottom: 6px;
+    }
+
+    .yt-watch.tablet .custom-volume-slider {
+        width: 50px;
+    }
+
+    /* ===== RESPONSIVE: TV custom controls ===== */
+    .yt-watch.tv .mode-btn {
+        padding: 8px 18px;
+        font-size: 14px;
+    }
+
+    .yt-watch.tv .custom-ctrl-btn {
+        padding: 8px;
+    }
+
+    .yt-watch.tv .custom-ctrl-btn svg {
+        width: 28px;
+        height: 28px;
+    }
+
+    .yt-watch.tv .custom-volume-slider {
+        width: 80px;
+    }
+
+    .yt-watch.tv .custom-time {
+        font-size: 14px;
+    }
+
+    .yt-watch.tv .custom-big-play {
+        width: 80px;
+        height: 80px;
+    }
+
+    /* Fullscreen styles */
+    .player-wrapper:fullscreen {
+        background: #000;
+    }
+
+    .player-wrapper:fullscreen iframe {
+        width: 100%;
+        height: 100%;
+    }
+
+    .player-wrapper:fullscreen .custom-controls {
+        padding: 20px 16px 12px;
+    }
+
+    .player-wrapper:fullscreen .custom-ctrl-btn svg {
+        width: 26px;
+        height: 26px;
+    }
+
+    .player-wrapper:fullscreen .custom-volume-slider {
+        width: 80px;
+    }
+
+    .player-wrapper:fullscreen .custom-time {
+        font-size: 14px;
     }
 </style>
