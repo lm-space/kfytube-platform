@@ -67,6 +67,7 @@
     let playerMode: 'custom' | 'playU' = 'custom';
     // Custom player state
     let isPlaying = false;
+    let hasEverPlayed = false;  // true once video plays for first time (hides big play btn on autoplay)
     let currentTime = 0;
     let duration = 0;
     let volume = 100;
@@ -102,8 +103,8 @@
         const ytId = vid.youtube_id || "";
         const sourceType = vid.source_type || "youtube";
         if (sourceType === "youtube" || !sourceType) {
-            // Custom mode: hide YT controls, enable JS API, disable annotations
-            return `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&controls=0&showinfo=0&iv_load_policy=3&disablekb=0&vq=hd1080&origin=${encodeURIComponent(window.location.origin)}`;
+            // Custom mode: hide ALL YT UI, enable JS API
+            return `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&controls=0&showinfo=0&iv_load_policy=3&fs=0&cc_load_policy=0&disablekb=1&vq=hd1080&origin=${encodeURIComponent(window.location.origin)}`;
         } else if (sourceType === "vimeo") {
             return `https://player.vimeo.com/video/${ytId}?autoplay=1&quality=1080p`;
         }
@@ -810,6 +811,7 @@
             isPlaying = state === 1;
             isBuffering = state === 3;
             if (state === 1) { // playing
+                hasEverPlayed = true;
                 startProgressTracking();
                 // Auto-hide controls after 3s
                 if (controlsTimeout) clearTimeout(controlsTimeout);
@@ -987,18 +989,6 @@
         <div class="watch-content">
             <!-- Main video section -->
             <div class="video-section">
-                <!-- Player Mode Toggle -->
-                <div class="player-mode-toggle">
-                    <button class="mode-btn" class:active={playerMode === 'custom'} on:click={() => { if (playerMode !== 'custom') togglePlayerMode(); }} title="Custom Player">
-                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zM9.5 7.5v9l7-4.5z"/></svg>
-                        <span>KFY Player</span>
-                    </button>
-                    <button class="mode-btn" class:active={playerMode === 'playU'} on:click={() => { if (playerMode !== 'playU') togglePlayerMode(); }} title="YouTube Player">
-                        <svg viewBox="0 0 28 20" width="18" height="13"><path fill={playerMode === 'playU' ? '#FF0000' : 'currentColor'} d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/><path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/></svg>
-                        <span>playU</span>
-                    </button>
-                </div>
-
                 <!-- Player -->
                 <div class="player-wrapper" class:custom-mode={playerMode === 'custom'} bind:this={playerWrapper}
                      on:mousemove={handlePlayerMouseMove} on:mouseleave={handlePlayerMouseLeave}>
@@ -1013,8 +1003,12 @@
                             title={video.title}
                         ></iframe>
 
-                        <!-- Click area for play/pause -->
-                        <div class="custom-click-area" on:click={customTogglePlay} on:dblclick={customToggleFullscreen}></div>
+                        <!-- Full overlay to block ALL YouTube UI interactions -->
+                        <div class="custom-click-area" on:click={customTogglePlay} on:dblclick={customToggleFullscreen}>
+                            <!-- Gradient masks to visually hide YouTube suggestions/watermarks -->
+                            <div class="yt-mask-top"></div>
+                            <div class="yt-mask-bottom"></div>
+                        </div>
 
                         <!-- Buffering spinner -->
                         {#if isBuffering}
@@ -1023,8 +1017,8 @@
                             </div>
                         {/if}
 
-                        <!-- Big play button when paused -->
-                        {#if !isPlaying && !videoEnded && !isBuffering}
+                        <!-- Big play button when paused (only after video has played once, not on initial autoplay load) -->
+                        {#if !isPlaying && !videoEnded && !isBuffering && hasEverPlayed}
                             <div class="custom-big-play" on:click={customTogglePlay}>
                                 <svg viewBox="0 0 68 48" width="68" height="48">
                                     <path fill="rgba(0,0,0,0.7)" d="M66.52 7.74C65.78 4.67 63.5 2.3 60.56 1.5 55.32 0 34 0 34 0S12.68 0 7.44 1.5C4.5 2.3 2.22 4.67 1.48 7.74 0 13.43 0 24 0 24s0 10.57 1.48 16.26C2.22 43.33 4.5 45.7 7.44 46.5 12.68 48 34 48 34 48s21.32 0 26.56-1.5c2.94-.8 5.22-3.17 5.96-6.24C68 34.57 68 24 68 24s0-10.57-1.48-16.26z"/>
@@ -1087,14 +1081,6 @@
 
                                 <!-- Right controls -->
                                 <div class="custom-controls-right">
-                                    <!-- Home -->
-                                    <button class="custom-ctrl-btn" on:click={goBack} title="Home">
-                                        <svg viewBox="0 0 28 20" width="22" height="16">
-                                            <path fill="#FF0000" d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/>
-                                            <path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/>
-                                        </svg>
-                                    </button>
-
                                     <!-- Fullscreen -->
                                     <button class="custom-ctrl-btn" on:click={customToggleFullscreen} title="Fullscreen">
                                         <svg viewBox="0 0 24 24" width="22" height="22"><path fill="white" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
@@ -1206,6 +1192,11 @@
                                         {/if}
                                     </button>
                                 {/if}
+                                <label class="custom-player-toggle" title="Toggle custom player (hides YouTube UI)">
+                                    <input type="checkbox" checked={playerMode === 'custom'} on:change={togglePlayerMode} />
+                                    <span class="custom-player-toggle-slider"></span>
+                                    <span class="custom-player-toggle-label">Custom Player</span>
+                                </label>
                             </div>
                         </div>
 
@@ -2640,47 +2631,57 @@
         font-size: 16px;
     }
 
-    /* ===== PLAYER MODE TOGGLE ===== */
-    .player-mode-toggle {
+    /* ===== CUSTOM PLAYER TOGGLE (inline toggle switch) ===== */
+    .custom-player-toggle {
         display: flex;
         align-items: center;
-        gap: 4px;
-        margin-bottom: 8px;
-        background: #1a1a1a;
-        border-radius: 8px;
-        padding: 3px;
-        width: fit-content;
+        gap: 8px;
+        cursor: pointer;
+        user-select: none;
     }
 
-    .mode-btn {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 14px;
-        border: none;
-        border-radius: 6px;
-        background: transparent;
-        color: #888;
-        font-size: 12px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s ease;
+    .custom-player-toggle input[type="checkbox"] {
+        display: none;
+    }
+
+    .custom-player-toggle-slider {
+        width: 36px;
+        height: 20px;
+        background: #555;
+        border-radius: 10px;
+        position: relative;
+        transition: background 0.2s ease;
+        flex-shrink: 0;
+    }
+
+    .custom-player-toggle-slider::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.2s ease;
+    }
+
+    .custom-player-toggle input:checked + .custom-player-toggle-slider {
+        background: #cc0000;
+    }
+
+    .custom-player-toggle input:checked + .custom-player-toggle-slider::after {
+        transform: translateX(16px);
+    }
+
+    .custom-player-toggle-label {
+        font-size: 13px;
+        color: #aaa;
         white-space: nowrap;
     }
 
-    .mode-btn:hover {
-        color: #ccc;
-        background: rgba(255,255,255,0.05);
-    }
-
-    .mode-btn.active {
-        background: #272727;
+    .custom-player-toggle input:checked ~ .custom-player-toggle-label {
         color: #fff;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-    }
-
-    .mode-btn svg {
-        flex-shrink: 0;
     }
 
     /* ===== CUSTOM PLAYER MODE ===== */
@@ -2698,9 +2699,32 @@
         top: 0;
         left: 0;
         width: 100%;
-        height: calc(100% - 50px);
+        height: 100%;
         z-index: 5;
         cursor: pointer;
+        /* Blocks ALL YouTube UI: end screen, channel logo, related videos, tooltips */
+    }
+
+    /* Gradient masks to visually hide YouTube UI that bleeds through the iframe */
+    .yt-mask-top {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 60px;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 50%, transparent 100%);
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+    }
+
+    .yt-mask-bottom {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 40px;
+        background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%);
+        pointer-events: none;
     }
 
     /* Buffering spinner */
@@ -2901,13 +2925,22 @@
     }
 
     /* ===== RESPONSIVE: Mobile custom controls ===== */
-    .yt-watch.mobile .player-mode-toggle {
-        margin-bottom: 6px;
+    .yt-watch.mobile .custom-player-toggle-label {
+        font-size: 11px;
     }
 
-    .yt-watch.mobile .mode-btn {
-        padding: 5px 10px;
-        font-size: 11px;
+    .yt-watch.mobile .custom-player-toggle-slider {
+        width: 30px;
+        height: 16px;
+    }
+
+    .yt-watch.mobile .custom-player-toggle-slider::after {
+        width: 12px;
+        height: 12px;
+    }
+
+    .yt-watch.mobile .custom-player-toggle input:checked + .custom-player-toggle-slider::after {
+        transform: translateX(14px);
     }
 
     .yt-watch.mobile .custom-controls {
@@ -2942,20 +2975,11 @@
     }
 
     /* ===== RESPONSIVE: Tablet custom controls ===== */
-    .yt-watch.tablet .player-mode-toggle {
-        margin-bottom: 6px;
-    }
-
     .yt-watch.tablet .custom-volume-slider {
         width: 50px;
     }
 
     /* ===== RESPONSIVE: TV custom controls ===== */
-    .yt-watch.tv .mode-btn {
-        padding: 8px 18px;
-        font-size: 14px;
-    }
-
     .yt-watch.tv .custom-ctrl-btn {
         padding: 8px;
     }
