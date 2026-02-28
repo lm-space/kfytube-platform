@@ -103,8 +103,8 @@
         const ytId = vid.youtube_id || "";
         const sourceType = vid.source_type || "youtube";
         if (sourceType === "youtube" || !sourceType) {
-            // Custom mode: hide ALL YT UI, enable JS API
-            return `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&controls=0&showinfo=0&iv_load_policy=3&fs=0&cc_load_policy=0&disablekb=1&vq=hd1080&origin=${encodeURIComponent(window.location.origin)}`;
+            // Custom mode: nocookie domain + hide ALL YT UI
+            return `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&controls=0&showinfo=0&iv_load_policy=3&fs=0&cc_load_policy=0&disablekb=1&vq=hd1080&origin=${encodeURIComponent(window.location.origin)}`;
         } else if (sourceType === "vimeo") {
             return `https://player.vimeo.com/video/${ytId}?autoplay=1&quality=1080p`;
         }
@@ -177,6 +177,12 @@
             try {
                 currentTime = ytPlayer.getCurrentTime?.() || 0;
                 duration = ytPlayer.getDuration?.() || 0;
+                // In custom mode: trigger our own ending overlay BEFORE YouTube shows
+                // its end screen cards (which appear in the last ~20 seconds).
+                // We trigger at 2 seconds before end — pauses video and shows our overlay.
+                if (playerMode === 'custom' && duration > 0 && (duration - currentTime) < 2 && !videoEnded) {
+                    onVideoEnding();
+                }
             } catch (e) {}
         }, 250);
     }
@@ -992,6 +998,14 @@
                 <!-- Player -->
                 <div class="player-wrapper" class:custom-mode={playerMode === 'custom'} bind:this={playerWrapper}
                      on:mousemove={handlePlayerMouseMove} on:mouseleave={handlePlayerMouseLeave}>
+                    <!-- Home logo - top left corner (both modes) -->
+                    <a href="/" class="player-home-logo" title="Home">
+                        <svg viewBox="0 0 28 20" width="28" height="20">
+                            <path fill="#FF0000" d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/>
+                            <path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/>
+                        </svg>
+                    </a>
+
                     {#if playerMode === 'custom'}
                         <!-- Custom Player Mode: YT iframe with controls=0 + our controls -->
                         <iframe
@@ -1081,6 +1095,13 @@
 
                                 <!-- Right controls -->
                                 <div class="custom-controls-right">
+                                    <!-- Home (YouTube logo) -->
+                                    <button class="custom-ctrl-btn" on:click={goBack} title="Home">
+                                        <svg viewBox="0 0 28 20" width="20" height="14">
+                                            <path fill="#FF0000" d="M27.97 3.12C27.64 1.89 26.68.93 25.45.6 23.22 0 14.29 0 14.29 0S5.35 0 3.12.6C1.89.93.93 1.89.6 3.12 0 5.35 0 10 0 10s0 4.65.6 6.88c.33 1.23 1.3 2.19 2.53 2.52C5.35 20 14.29 20 14.29 20s8.93 0 11.16-.6c1.23-.33 2.19-1.3 2.52-2.52.6-2.23.6-6.88.6-6.88s-.003-4.65-.6-6.88z"/>
+                                            <path fill="white" d="M11.43 14.29l7.42-4.29-7.42-4.29v8.57z"/>
+                                        </svg>
+                                    </button>
                                     <!-- Fullscreen -->
                                     <button class="custom-ctrl-btn" on:click={customToggleFullscreen} title="Fullscreen">
                                         <svg viewBox="0 0 24 24" width="22" height="22"><path fill="white" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
@@ -2684,6 +2705,37 @@
         color: #fff;
     }
 
+    /* ===== PLAYER HOME LOGO (top-left, both modes) ===== */
+    .player-home-logo {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 6px 8px;
+        background: rgba(0,0,0,0.6);
+        border-radius: 4px;
+        text-decoration: none;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+        pointer-events: auto;
+    }
+
+    .player-wrapper:hover .player-home-logo,
+    .player-home-logo:focus {
+        opacity: 1;
+    }
+
+    .player-home-logo:hover {
+        background: rgba(0,0,0,0.85);
+    }
+
+    .player-home-logo svg {
+        display: block;
+    }
+
     /* ===== CUSTOM PLAYER MODE ===== */
     .player-wrapper.custom-mode {
         position: relative;
@@ -2711,10 +2763,9 @@
         top: 0;
         left: 0;
         width: 100%;
-        height: 60px;
-        background: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 50%, transparent 100%);
+        height: 80px;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.5) 40%, transparent 100%);
         pointer-events: none;
-        transition: opacity 0.3s ease;
     }
 
     .yt-mask-bottom {
@@ -2722,10 +2773,11 @@
         bottom: 0;
         left: 0;
         width: 100%;
-        height: 40px;
-        background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%);
+        height: 50px;
+        background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%);
         pointer-events: none;
     }
+
 
     /* Buffering spinner */
     .custom-buffering {
@@ -2922,6 +2974,18 @@
         margin-left: 8px;
         white-space: nowrap;
         user-select: none;
+    }
+
+    /* ===== RESPONSIVE: Mobile home logo ===== */
+    .yt-watch.mobile .player-home-logo {
+        top: 8px;
+        left: 8px;
+        padding: 4px 6px;
+    }
+
+    .yt-watch.mobile .player-home-logo svg {
+        width: 22px;
+        height: 16px;
     }
 
     /* ===== RESPONSIVE: Mobile custom controls ===== */
