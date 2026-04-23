@@ -101,6 +101,75 @@ function parseVideoSource(urlStr: string): { id: string, source: string, isShort
     return null;
 }
 
+/**
+ * Insert or update a video from Telegram and move it to the top of its category
+ * (ORDER BY display_order ASC). INSERT OR IGNORE left duplicates unchanged, so
+ * reposts did not refresh category/title or surface the item at the top.
+ */
+async function upsertTelegramVideo(
+    db: D1Database,
+    params: {
+        youtubeId: string;
+        title: string;
+        categoryId: number | null;
+        source: string;
+        isShort: boolean;
+        tenantId: number;
+    }
+): Promise<boolean> {
+    const { youtubeId, title, categoryId, source, isShort, tenantId } = params;
+    const isShortInt = isShort ? 1 : 0;
+
+    const existing = await db.prepare(`
+        SELECT id FROM videos
+        WHERE youtube_id = ?
+        ORDER BY (CASE WHEN COALESCE(tenant_id, 0) = ? THEN 1 ELSE 0 END) DESC, id DESC
+        LIMIT 1
+    `).bind(youtubeId, tenantId).first() as { id: number } | null;
+
+    let videoId: number | null = existing?.id ?? null;
+
+    if (videoId != null) {
+        await db.prepare(`
+            UPDATE videos SET
+                title = ?,
+                category_id = ?,
+                source_type = ?,
+                is_short = ?,
+                tenant_id = ?,
+                is_global = 1
+            WHERE id = ?
+        `).bind(title, categoryId, source, isShortInt, tenantId, videoId).run();
+    } else {
+        const ins = await db.prepare(`
+            INSERT INTO videos (youtube_id, title, category_id, is_global, source_type, is_short, tenant_id)
+            VALUES (?, ?, ?, 1, ?, ?, ?)
+        `).bind(youtubeId, title, categoryId, source, isShortInt, tenantId).run();
+        const lid = ins.meta?.last_row_id;
+        videoId = typeof lid === 'number' && lid > 0 ? lid : null;
+    }
+
+    if (videoId == null) return false;
+
+    let minRow: { m: number | null } | null;
+    if (categoryId != null) {
+        minRow = await db.prepare(`
+            SELECT MIN(display_order) AS m FROM videos
+            WHERE category_id = ? AND id != ?
+        `).bind(categoryId, videoId).first() as { m: number | null } | null;
+    } else {
+        minRow = await db.prepare(`
+            SELECT MIN(display_order) AS m FROM videos
+            WHERE category_id IS NULL AND id != ?
+        `).bind(videoId).first() as { m: number | null } | null;
+    }
+    const minOrder = minRow?.m;
+    const nextOrder = minOrder == null ? 0 : minOrder - 1;
+    await db.prepare('UPDATE videos SET display_order = ? WHERE id = ?').bind(nextOrder, videoId).run();
+
+    return true;
+}
+
 // --- TELEGRAM WEBHOOK ---
 app.get('/api/telegram-debug', async (c) => {
     const logs = await c.env.DB.prepare('SELECT * FROM telegram_debug_logs ORDER BY id DESC LIMIT 20').all();
@@ -524,11 +593,16 @@ app.post('/api/telegram-webhook', async (c) => {
                 } catch (e) { }
             }
 
-            // Insert into DB with tenant_id (use effective tenant - override or user's default)
             try {
-                await c.env.DB.prepare('INSERT OR IGNORE INTO videos (youtube_id, title, category_id, is_global, source_type, is_short, tenant_id) VALUES (?, ?, ?, 1, ?, ?, ?)')
-                    .bind(id, title, targetCategoryId, source, isShort ? 1 : 0, effectiveTenantId).run();
-                addedCount++;
+                const ok = await upsertTelegramVideo(c.env.DB, {
+                    youtubeId: id,
+                    title,
+                    categoryId: targetCategoryId,
+                    source,
+                    isShort: !!isShort,
+                    tenantId: effectiveTenantId
+                });
+                if (ok) addedCount++;
             } catch (e) {
                 console.error(e);
                 debugLog.push(`DB Error: ${e}`);
@@ -564,7 +638,7 @@ app.post('/api/telegram-webhook', async (c) => {
         }
         // Show if tenant was overridden
         const overrideNote = overrideTenantId !== null ? ' (tenant override)' : '';
-        await sendTelegramReply(token, chatId, `✅ Added ${addedCount} video(s) to '${targetCategoryName}'${tenantInfo}${overrideNote}.`);
+        await sendTelegramReply(token, chatId, `✅ Added or updated ${addedCount} video(s) in '${targetCategoryName}' (moved to top)${tenantInfo}${overrideNote}.`);
     } else {
         const firstUrl = urlMatch[0];
         await sendTelegramReply(token, chatId, `⚠️ Found link: ${firstUrl}\nBut could not capture a valid video ID.\nSupported: YouTube, Instagram, Twitter/X, TikTok, Facebook.`);
