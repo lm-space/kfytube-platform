@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
-    import { API_BASE, categories, getPublicApiHeaders } from "../../lib/stores";
+    import { API_BASE, categories, getPublicApiHeaders, favorites, toggleFavorite } from "../../lib/stores";
     import Comments from "./Comments.svelte";
 
     let video: any = null;
@@ -59,6 +59,64 @@
     let repeatCurrentIndex = 0; // Current video position in the repeat list
     let repeatTotalVideos = 0; // Total videos in repeat list
     let repeatVideosList: any[] = []; // All videos in repeat list for modal
+
+    // Favorites
+    let currentFavorites: number[] = [];
+    $: isFavorited = video ? currentFavorites.includes(video.id) : false;
+    favorites.subscribe(val => { currentFavorites = val; });
+
+    // Favorites repeat mode
+    let repeatFavoritesMode = false;
+
+    // Not-found reporting
+    let reportedNotFound = false;
+    let reportingNotFound = false;
+    let videoUnavailable = false;     // true when YT fires an unplayable error
+    let unavailableCountdown = 5;
+    let unavailableTimer: ReturnType<typeof setInterval> | null = null;
+
+    async function reportNotFound() {
+        if (!video || reportedNotFound || reportingNotFound) return;
+        reportingNotFound = true;
+        try {
+            await fetch(`${API_BASE}/videos/${video.id}/not-found`, { method: 'POST' });
+            reportedNotFound = true;
+        } catch {}
+        reportingNotFound = false;
+    }
+
+    // YouTube IFrame API error codes:
+    // 100 = video removed / made private
+    // 101 = owner does not allow embedded playback
+    // 150 = same as 101
+    // 5   = HTML5 content error
+    async function onYTError(event: any) {
+        const code = event.data;
+        console.warn('[KfyTube] YT player error code:', code);
+        videoUnavailable = true;
+
+        // Auto-report to backend (silently)
+        if (video) {
+            try {
+                await fetch(`${API_BASE}/videos/${video.id}/not-found`, { method: 'POST' });
+                reportedNotFound = true;
+            } catch {}
+        }
+
+        // Auto-skip to next video after countdown
+        const next = pickNextAutoplayVideo();
+        if (next && autoPlayEnabled) {
+            unavailableCountdown = 5;
+            unavailableTimer = setInterval(() => {
+                unavailableCountdown--;
+                if (unavailableCountdown <= 0) {
+                    clearInterval(unavailableTimer!);
+                    unavailableTimer = null;
+                    openVideo(next);
+                }
+            }, 1000);
+        }
+    }
 
     // YouTube IFrame Player API
     let ytPlayer: any = null;
@@ -229,8 +287,10 @@
         const videoId = params.get("id");
         const urlRepeatCat = params.get("repeat_cat"); // Category ID for repeat mode
         const urlRepeatPl = params.get("repeat_pl");   // Playlist ID for repeat mode
+        const urlRepeatFav = params.get("repeat_fav"); // Favorites repeat mode
         const urlRepeatIdx = params.get("ridx");        // Current index in repeat list
-        console.warn('Video ID:', videoId, '| Repeat context:', { urlRepeatCat, urlRepeatPl, urlRepeatIdx });
+        if (urlRepeatFav === '1') repeatFavoritesMode = true;
+        console.warn('Video ID:', videoId, '| Repeat context:', { urlRepeatCat, urlRepeatPl, urlRepeatFav, urlRepeatIdx });
 
         if (!videoId) {
             window.location.href = "/youtube";
@@ -456,6 +516,23 @@
                         }
                         console.warn(`%c🔁 REPEAT MODE INITIALIZED: index ${repeatCurrentIndex}/${repeatTotalVideos} videos (from URL: ${urlRepeatIdx !== null})`, 'background: #4caf80; color: white; padding: 5px; font-weight: bold;');
                     }
+                } else if (repeatFavoritesMode) {
+                    // Favorites repeat: filter allFetchedVideos by localStorage favorites
+                    const favIds = currentFavorites;
+                    const favVids = allFetchedVideos.filter((v: any) => favIds.includes(v.id));
+                    if (favVids.length > 0) {
+                        repeatModeAllVideos.set('fav', favVids);
+                        repeatTotalVideos = favVids.length;
+                        repeatVideosList = favVids;
+                        if (urlRepeatIdx !== null) {
+                            repeatCurrentIndex = parseInt(urlRepeatIdx);
+                            if (repeatCurrentIndex < 0 || repeatCurrentIndex >= favVids.length) repeatCurrentIndex = 0;
+                        } else {
+                            const currentPos = findVideoIndex(favVids, video);
+                            repeatCurrentIndex = currentPos >= 0 ? currentPos : 0;
+                        }
+                        console.warn(`%c🔁 FAVORITES REPEAT: index ${repeatCurrentIndex}/${repeatTotalVideos}`, 'background: #e17055; color: white; padding: 5px; font-weight: bold;');
+                    }
                 }
 
                 // On desktop, load more initially since the sidebar is taller
@@ -615,6 +692,10 @@
             const allVids = repeatModeAllVideos.get(`pl_${currentPlaylistId}`);
             const idx = overrideIdx ?? (allVids ? allVids.findIndex(v => v.id === vid.id || v.id == vid.id) : -1);
             url += `&repeat_pl=${currentPlaylistId}&ridx=${idx >= 0 ? idx : 0}`;
+        } else if (repeatFavoritesMode) {
+            const allVids = repeatModeAllVideos.get('fav');
+            const idx = overrideIdx ?? (allVids ? allVids.findIndex(v => v.id === vid.id || v.id == vid.id) : -1);
+            url += `&repeat_fav=1&ridx=${idx >= 0 ? idx : 0}`;
         }
 
         window.location.href = url;
@@ -791,6 +872,7 @@
                 events: {
                     onStateChange: onYTStateChange,
                     onReady: onYTReady,
+                    onError: onYTError,
                 }
             });
         } catch (e) {
@@ -807,6 +889,22 @@
             } catch (e) {}
             startProgressTracking();
         }
+
+        // YouTube doesn't fire onError for private/removed videos — the player
+        // just loads silently with 0 duration and never starts playing.
+        // Detect this by rechecking duration after 3 seconds.
+        setTimeout(() => {
+            if (videoUnavailable) return; // already handled
+            try {
+                const dur = ytPlayer?.getDuration?.() ?? 0;
+                const state = ytPlayer?.getPlayerState?.() ?? -1;
+                // state -1 = unstarted, 0 = ended, 5 = video cued
+                // A normal video that autoplayod will have state 1 or 3 by now
+                if (dur === 0 && (state === -1 || state === 5)) {
+                    onYTError({ data: 100 });
+                }
+            } catch (e) {}
+        }, 3000);
     }
 
     function onYTStateChange(event: any) {
@@ -873,6 +971,19 @@
                 const nextIdx = (repeatCurrentIndex + 1) % allVids.length;
                 const nextVid = allVids[nextIdx];
                 console.warn(`%c[REPEAT] Playlist ${currentPlaylistId}: advancing ${repeatCurrentIndex} → ${nextIdx} of ${allVids.length}`, 'background: #ffa502; color: white; padding: 5px; font-weight: bold;');
+                repeatCurrentIndex = nextIdx;
+                return nextVid;
+            }
+        }
+
+        if (repeatFavoritesMode) {
+            const allVids = repeatModeAllVideos.get('fav');
+            if (allVids && allVids.length > 0) {
+                repeatTotalVideos = allVids.length;
+                repeatVideosList = allVids;
+                const nextIdx = (repeatCurrentIndex + 1) % allVids.length;
+                const nextVid = allVids[nextIdx];
+                console.warn(`%c[REPEAT] Favorites: advancing ${repeatCurrentIndex} → ${nextIdx} of ${allVids.length}`, 'background: #e17055; color: white; padding: 5px; font-weight: bold;');
                 repeatCurrentIndex = nextIdx;
                 return nextVid;
             }
@@ -998,6 +1109,25 @@
                 <!-- Player -->
                 <div class="player-wrapper" class:custom-mode={playerMode === 'custom'} bind:this={playerWrapper}
                      on:mousemove={handlePlayerMouseMove} on:mouseleave={handlePlayerMouseLeave}>
+
+                    <!-- Video unavailable overlay (private / deleted / not embeddable) -->
+                    {#if videoUnavailable}
+                        <div class="unavailable-overlay">
+                            <svg viewBox="0 0 24 24" width="52" height="52" style="opacity:0.6">
+                                <path fill="white" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                            </svg>
+                            <p class="unavailable-title">Video unavailable</p>
+                            <p class="unavailable-sub">This video is private, deleted, or can't be embedded.</p>
+                            {#if unavailableTimer}
+                                <p class="unavailable-skip">Skipping to next video in <strong>{unavailableCountdown}s</strong>…
+                                    <button on:click={() => { clearInterval(unavailableTimer!); unavailableTimer = null; const next = pickNextAutoplayVideo(); if (next) openVideo(next); }}>Skip now</button>
+                                </p>
+                            {:else}
+                                <button class="unavailable-back-btn" on:click={() => window.history.back()}>Go back</button>
+                            {/if}
+                        </div>
+                    {/if}
+
                     <!-- Home logo - top left corner (both modes) -->
                     <a href="/" class="player-home-logo" title="Home">
                         <svg viewBox="0 0 28 20" width="28" height="20">
@@ -1199,6 +1329,22 @@
                                 </div>
                             </a>
                             <button class="subscribe-btn">Subscribe</button>
+                            <button
+                                class="favorite-btn"
+                                class:favorited={isFavorited}
+                                on:click={() => toggleFavorite(video.id)}
+                                title={isFavorited ? 'Remove from Favorites' : 'Add to Favorites'}
+                            >
+                                <svg viewBox="0 0 24 24" width="18" height="18">
+                                    {#if isFavorited}
+                                        <path fill="currentColor" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                                    {:else}
+                                        <path fill="currentColor" d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>
+                                    {/if}
+                                </svg>
+                                <span>{isFavorited ? 'Saved' : 'Favorites'}</span>
+                            </button>
+                            <a href="/youtube?view=favorites" class="favorites-link-btn" title="View all favorites">My Favorites</a>
                             <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
                                 <label class="autoplay-inline">
                                     <input type="checkbox" bind:checked={autoPlayEnabled} />
@@ -1244,6 +1390,19 @@
                                     <path fill="currentColor" d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/>
                                 </svg>
                                 <span>Save</span>
+                            </button>
+                            <!-- Report not found -->
+                            <button
+                                class="action-btn not-found-btn"
+                                class:reported={reportedNotFound}
+                                on:click={reportNotFound}
+                                disabled={reportedNotFound || reportingNotFound}
+                                title="Video not available or can't be played?"
+                            >
+                                <svg viewBox="0 0 24 24" width="20" height="20">
+                                    <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                                </svg>
+                                <span>{reportedNotFound ? 'Reported' : 'Not Available'}</span>
                             </button>
                             <!-- Toggle info section button -->
                             <button class="action-btn info-toggle" on:click={() => infoCollapsed = !infoCollapsed} title={infoCollapsed ? 'Show details' : 'Hide details'}>
@@ -1505,6 +1664,57 @@
         height: 100%;
         border: none;
     }
+
+    .unavailable-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        background: #0f0f0f;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 24px;
+        text-align: center;
+        border-radius: 12px;
+    }
+    .unavailable-title {
+        font-size: 20px;
+        font-weight: 600;
+        color: #fff;
+        margin: 0;
+    }
+    .unavailable-sub {
+        font-size: 14px;
+        color: #aaa;
+        margin: 0;
+    }
+    .unavailable-skip {
+        font-size: 14px;
+        color: #aaa;
+        margin: 0;
+    }
+    .unavailable-skip button {
+        background: none;
+        border: none;
+        color: #3ea6ff;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 0 4px;
+        text-decoration: underline;
+    }
+    .unavailable-back-btn {
+        margin-top: 8px;
+        background: #272727;
+        border: none;
+        color: #fff;
+        padding: 8px 20px;
+        border-radius: 20px;
+        font-size: 14px;
+        cursor: pointer;
+    }
+    .unavailable-back-btn:hover { background: #3f3f3f; }
 
     /* Click blocker for top area (title/channel info) */
     .yt-top-blocker {
@@ -2131,6 +2341,43 @@
     .subscribe-btn:hover {
         background: #e0e0e0;
     }
+
+    .favorite-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--yt-bg-secondary, #272727);
+        border: none;
+        color: var(--yt-text, #fff);
+        padding: 7px 14px;
+        border-radius: 20px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+    }
+    .favorite-btn:hover { background: var(--yt-bg-hover, #3f3f3f); }
+    .favorite-btn.favorited { color: #f0c040; }
+    .favorite-btn.favorited svg { fill: #f0c040; }
+
+    .favorites-link-btn {
+        display: flex;
+        align-items: center;
+        background: none;
+        border: 1px solid #555;
+        color: #aaa;
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        text-decoration: none;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s;
+    }
+    .favorites-link-btn:hover { border-color: #f0c040; color: #f0c040; }
+
+    .action-btn.not-found-btn { color: #aaa; }
+    .action-btn.not-found-btn:hover { color: #ff6b6b; background: rgba(255,107,107,0.1); }
+    .action-btn.not-found-btn.reported { color: #888; cursor: default; }
+    .action-btn.not-found-btn:disabled { opacity: 0.6; cursor: default; }
 
     .action-buttons {
         display: flex;

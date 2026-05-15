@@ -112,6 +112,40 @@ export async function refreshData() {
     }
 }
 
+// --- FAVORITES ---
+function loadFavorites(): number[] {
+    try { return JSON.parse(localStorage.getItem('kfytube_favorites') || '[]'); } catch { return []; }
+}
+export const favorites = writable<number[]>(loadFavorites());
+favorites.subscribe(val => {
+    try { localStorage.setItem('kfytube_favorites', JSON.stringify(val)); } catch {}
+});
+export function toggleFavorite(videoId: number) {
+    favorites.update(fav =>
+        fav.includes(videoId) ? fav.filter(id => id !== videoId) : [...fav, videoId]
+    );
+}
+
+// --- RECENT SEARCHES ---
+function loadRecentSearches(): string[] {
+    try { return JSON.parse(localStorage.getItem('kfytube_searches') || '[]'); } catch { return []; }
+}
+export const recentSearches = writable<string[]>(loadRecentSearches());
+recentSearches.subscribe(val => {
+    try { localStorage.setItem('kfytube_searches', JSON.stringify(val)); } catch {}
+});
+export function addRecentSearch(query: string) {
+    const q = query.trim();
+    if (!q) return;
+    recentSearches.update(s => {
+        const filtered = s.filter(x => x.toLowerCase() !== q.toLowerCase());
+        return [q, ...filtered].slice(0, 7);
+    });
+}
+export function removeRecentSearch(query: string) {
+    recentSearches.update(s => s.filter(x => x !== query));
+}
+
 // Fetch tenant info on load
 export async function loadTenantInfo() {
     const slug = getTenantSlug();

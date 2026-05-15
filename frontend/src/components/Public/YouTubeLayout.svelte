@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
-    import { API_BASE, categories, getPublicApiHeaders, getTenantSlug, tenantInfo, loadTenantInfo } from "../../lib/stores";
+    import { API_BASE, categories, getPublicApiHeaders, getTenantSlug, tenantInfo, loadTenantInfo, favorites, toggleFavorite, recentSearches, addRecentSearch, removeRecentSearch } from "../../lib/stores";
     import UserProfile from "./UserProfile.svelte";
 
     // View mode
@@ -10,7 +10,7 @@
     let filteredVideos: any[] = [];
     let displayedVideos: any[] = [];
     let loading = true;
-    let activeTab: "home" | "shorts" | "channels" | "playlists" | "mix" = "home";
+    let activeTab: "home" | "shorts" | "channels" | "playlists" | "mix" | "favorites" = "home";
     let activeFilter: string | number = 'all';
 
     // Channels list view
@@ -42,6 +42,19 @@
     let searchQuery = "";
     let isSearching = false;
     let mobileSearchExpanded = false;
+    let showSearchDropdown = false;
+    let isListening = false;
+    let voiceSupported = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+    let currentRecentSearches: string[] = [];
+    recentSearches.subscribe(val => { currentRecentSearches = val; });
+
+    // Favorites
+    let currentFavorites: number[] = [];
+    let favoritedVideos: any[] = [];
+    favorites.subscribe(val => {
+        currentFavorites = val;
+        if (activeTab === 'favorites') updateFavoritedVideos();
+    });
 
     // For channel/category display
     let categoryMap: Map<string, string> = new Map();
@@ -67,30 +80,30 @@
         checkDevice();
         window.addEventListener("resize", checkDevice);
 
-        // Parse URL for channel_id, category_id, playlist_id, or view parameter
+        // Parse URL for channel_id, category_id, playlist_id, view, or search query
         const urlParams = new URLSearchParams(window.location.search);
         const chId = urlParams.get('channel_id');
         const catId = urlParams.get('category_id');
         const plId = urlParams.get('playlist_id');
         const viewParam = urlParams.get('view');
-        if (chId) {
-            channelId = parseInt(chId);
-        }
-        if (catId) {
-            urlCategoryId = parseInt(catId);
-        }
-        if (plId) {
-            urlPlaylistId = parseInt(plId);
-        }
-        if (viewParam === 'channels') {
-            activeTab = 'channels';
-        }
-        if (viewParam === 'playlists') {
-            activeTab = 'playlists';
-        }
-        if (viewParam === 'mix') {
-            activeTab = 'mix';
-        }
+        const qParam = urlParams.get('q');
+        if (chId) channelId = parseInt(chId);
+        if (catId) urlCategoryId = parseInt(catId);
+        if (plId) urlPlaylistId = parseInt(plId);
+        if (viewParam === 'channels') activeTab = 'channels';
+        if (viewParam === 'playlists') activeTab = 'playlists';
+        if (viewParam === 'mix') activeTab = 'mix';
+        if (viewParam === 'favorites') activeTab = 'favorites';
+        if (qParam) { searchQuery = qParam; }
+
+        // Handle browser back/forward with search URL
+        window.addEventListener('popstate', () => {
+            const p = new URLSearchParams(window.location.search);
+            const q = p.get('q') || '';
+            searchQuery = q;
+            if (q) { isSearching = true; handleSearch(false); }
+            else { isSearching = false; filterByCategory(activeFilter); }
+        });
 
         // Load tenant info if on a subdomain
         await loadTenantInfo();
@@ -251,7 +264,16 @@
             regularVideos = sortByCategoryOrder(regularVideos);
             shortsVideos = sortByCategoryOrder(shortsVideos);
             filteredVideos = regularVideos;
-            updateDisplayedVideos();
+
+            // Restore search from URL ?q= param
+            if (qParam) {
+                handleSearch(false);
+            } else {
+                updateDisplayedVideos();
+            }
+
+            // Build favorites list
+            updateFavoritedVideos();
         } catch (e) {
             console.error("Failed to load videos", e);
         }
@@ -300,9 +322,10 @@
 
     function filterByCategory(categoryId: string | number) {
         activeFilter = categoryId;
-        currentPage = 1; // Reset pagination when filtering
-        searchQuery = ""; // Clear search when changing category
+        currentPage = 1;
+        searchQuery = "";
         isSearching = false;
+        showSearchDropdown = false;
         if (categoryId === 'all') {
             // Show all videos sorted by category order
             filteredVideos = sortByCategoryOrder(regularVideos);
@@ -321,17 +344,31 @@
         updateDisplayedVideos();
     }
 
-    function handleSearch() {
+    function updateFavoritedVideos() {
+        favoritedVideos = allVideos.filter(v => currentFavorites.includes(v.id));
+    }
+
+    function openFavoritedVideo(video: any) {
+        // Find index in favorites list for repeat context
+        const idx = favoritedVideos.findIndex(v => v.id === video.id);
+        window.location.href = `/yt-watch?id=${video.id}&repeat_fav=1&ridx=${idx >= 0 ? idx : 0}`;
+    }
+
+    function handleSearch(pushState: boolean = true) {
         const query = searchQuery.trim().toLowerCase();
         currentPage = 1;
+        showSearchDropdown = false;
 
         if (!query) {
             isSearching = false;
-            // Reset to current category filter
+            if (pushState) {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('q');
+                window.history.pushState({}, '', url.toString());
+            }
             if (activeFilter === 'all') {
                 filteredVideos = sortByCategoryOrder(regularVideos);
             } else {
-                // Sort by display_order from admin
                 filteredVideos = regularVideos
                     .filter(v => v.category_id == activeFilter)
                     .sort((a, b) => {
@@ -342,7 +379,12 @@
             }
         } else {
             isSearching = true;
-            // Search across all videos (regular + shorts)
+            if (pushState) {
+                addRecentSearch(searchQuery.trim());
+                const url = new URL(window.location.href);
+                url.searchParams.set('q', searchQuery.trim());
+                window.history.pushState({}, '', url.toString());
+            }
             filteredVideos = allVideos.filter(v =>
                 v.title?.toLowerCase().includes(query) ||
                 getCategoryName(v).toLowerCase().includes(query)
@@ -351,9 +393,28 @@
         updateDisplayedVideos();
     }
 
+    function startVoiceSearch() {
+        if (!voiceSupported) return;
+        const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        const recognition = new SR();
+        recognition.lang = 'en-US';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        isListening = true;
+        recognition.start();
+        recognition.onresult = (event: any) => {
+            const transcript = event.results[0][0].transcript;
+            searchQuery = transcript;
+            isListening = false;
+            handleSearch();
+        };
+        recognition.onerror = () => { isListening = false; };
+        recognition.onend = () => { isListening = false; };
+    }
+
     function clearSearch() {
         searchQuery = "";
-        handleSearch();
+        handleSearch(true);
     }
 
     function toggleMobileSearch() {
@@ -519,25 +580,63 @@
 
         <!-- Desktop/Tablet Search -->
         <div class="header-center">
-            <div class="search-box">
-                <input
-                    type="text"
-                    placeholder="Search"
-                    bind:value={searchQuery}
-                    on:keydown={(e) => e.key === 'Enter' && handleSearch()}
-                />
-                {#if searchQuery}
-                    <button class="clear-btn" on:click={clearSearch} aria-label="Clear search">
-                        <svg viewBox="0 0 24 24" width="20" height="20">
-                            <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            <div class="search-wrapper">
+                <div class="search-box">
+                    <input
+                        type="text"
+                        placeholder="Search"
+                        bind:value={searchQuery}
+                        on:keydown={(e) => e.key === 'Enter' && handleSearch()}
+                        on:focus={() => { showSearchDropdown = true; }}
+                        on:blur={() => setTimeout(() => { showSearchDropdown = false; }, 150)}
+                    />
+                    {#if searchQuery}
+                        <button class="clear-btn" on:click={clearSearch} aria-label="Clear search">
+                            <svg viewBox="0 0 24 24" width="20" height="20">
+                                <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                            </svg>
+                        </button>
+                    {/if}
+                    <button class="search-btn" on:click={() => handleSearch()} aria-label="Search">
+                        <svg viewBox="0 0 24 24" width="24" height="24">
+                            <path fill="currentColor" d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
                         </svg>
                     </button>
+                </div>
+                {#if voiceSupported}
+                    <button class="mic-btn" class:listening={isListening} on:click={startVoiceSearch} aria-label="Voice search" title="Search by voice">
+                        {#if isListening}
+                            <svg viewBox="0 0 24 24" width="22" height="22">
+                                <path fill="#f00" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
+                            </svg>
+                        {:else}
+                            <svg viewBox="0 0 24 24" width="22" height="22">
+                                <path fill="currentColor" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
+                            </svg>
+                        {/if}
+                    </button>
                 {/if}
-                <button class="search-btn" on:click={handleSearch} aria-label="Search">
-                    <svg viewBox="0 0 24 24" width="24" height="24">
-                        <path fill="currentColor" d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
-                    </svg>
-                </button>
+                <!-- Recent searches dropdown -->
+                {#if showSearchDropdown && !searchQuery && currentRecentSearches.length > 0}
+                    <div class="search-dropdown">
+                        <div class="dropdown-label">Recent searches</div>
+                        {#each currentRecentSearches as term}
+                            <div class="dropdown-item">
+                                <button class="dropdown-search-btn" on:mousedown|preventDefault={() => { searchQuery = term; handleSearch(); }}>
+                                    <svg viewBox="0 0 24 24" width="16" height="16" style="opacity:0.5">
+                                        <path fill="currentColor" d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9z"/>
+                                    </svg>
+                                    <span>{term}</span>
+                                </button>
+                                <button class="dropdown-remove-btn" on:mousedown|preventDefault={() => removeRecentSearch(term)} aria-label="Remove">
+                                    <svg viewBox="0 0 24 24" width="16" height="16">
+                                        <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
             </div>
         </div>
 
@@ -631,6 +730,16 @@
                         </svg>
                         <span>Categories</span>
                     </button>
+                    <a class="nav-item" class:active={activeTab === 'favorites'} href="/youtube?view=favorites">
+                        <svg viewBox="0 0 24 24" width="24" height="24">
+                            {#if activeTab === 'favorites' || currentFavorites.length > 0}
+                                <path fill="#f0c040" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                            {:else}
+                                <path fill="currentColor" d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>
+                            {/if}
+                        </svg>
+                        <span>Favorites {#if currentFavorites.length > 0}<span class="fav-count">{currentFavorites.length}</span>{/if}</span>
+                    </a>
                 {/if}
             </nav>
         </aside>
@@ -968,6 +1077,49 @@
                                             </button>
                                         {/if}
                                     </div>
+                                {/each}
+                            </div>
+                        {/if}
+                    </section>
+                {:else if activeTab === "favorites"}
+                    <section class="favorites-section">
+                        <div class="favorites-header">
+                            <svg viewBox="0 0 24 24" width="24" height="24" style="color:#f0c040">
+                                <path fill="#f0c040" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                            </svg>
+                            <h2>Favorites</h2>
+                            <span class="fav-header-count">{favoritedVideos.length} video{favoritedVideos.length !== 1 ? 's' : ''}</span>
+                        </div>
+                        {#if favoritedVideos.length === 0}
+                            <div class="no-favorites">
+                                <svg viewBox="0 0 24 24" width="48" height="48" style="opacity:0.3">
+                                    <path fill="currentColor" d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24z"/>
+                                </svg>
+                                <p>No favorites yet</p>
+                                <p class="no-fav-hint">Tap ⭐ on any video to save it here</p>
+                            </div>
+                        {:else}
+                            <div class="video-grid">
+                                {#each favoritedVideos as video}
+                                    <button class="video-card" on:click={() => openFavoritedVideo(video)}>
+                                        <div class="thumbnail">
+                                            <img src={`https://img.youtube.com/vi/${video.youtube_id}/mqdefault.jpg`} alt={video.title} loading="lazy" />
+                                            <span class="duration">{formatDuration(video.duration)}</span>
+                                            <div class="fav-remove-btn" role="button" tabindex="0" on:click|stopPropagation={() => toggleFavorite(video.id)} on:keydown|stopPropagation={(e) => e.key === 'Enter' && toggleFavorite(video.id)} title="Remove from favorites">
+                                                <svg viewBox="0 0 24 24" width="16" height="16"><path fill="#f0c040" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+                                            </div>
+                                        </div>
+                                        <div class="video-info">
+                                            <div class="channel-avatar">
+                                                <span>{getCategoryName(video).charAt(0).toUpperCase()}</span>
+                                            </div>
+                                            <div class="video-meta">
+                                                <h3 class="video-title">{video.title}</h3>
+                                                <p class="channel-name">{getCategoryName(video)}</p>
+                                                <p class="video-stats">{formatViews(video.view_count)} • {formatTimeAgo(video.published_at)}</p>
+                                            </div>
+                                        </div>
+                                    </button>
                                 {/each}
                             </div>
                         {/if}
@@ -2324,4 +2476,138 @@
             gap: 8px;
         }
     }
+
+    /* ---- Search wrapper (dropdown + mic) ---- */
+    .search-wrapper {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .mic-btn {
+        flex-shrink: 0;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: none;
+        background: var(--yt-bg-secondary, #272727);
+        color: var(--yt-text, #fff);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    .mic-btn:hover { background: var(--yt-bg-hover, #3f3f3f); }
+    .mic-btn.listening {
+        background: rgba(255, 0, 0, 0.15);
+        animation: pulse-mic 1s ease-in-out infinite;
+    }
+    @keyframes pulse-mic {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255,0,0,0.4); }
+        50% { box-shadow: 0 0 0 8px rgba(255,0,0,0); }
+    }
+
+    .search-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        right: 0;
+        background: #212121;
+        border: 1px solid #3f3f3f;
+        border-radius: 12px;
+        overflow: hidden;
+        z-index: 200;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .dropdown-label {
+        padding: 8px 14px 4px;
+        font-size: 11px;
+        color: #aaa;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .dropdown-item {
+        display: flex;
+        align-items: center;
+    }
+    .dropdown-search-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 14px;
+        background: none;
+        border: none;
+        color: var(--yt-text, #fff);
+        font-size: 14px;
+        cursor: pointer;
+        text-align: left;
+    }
+    .dropdown-search-btn:hover { background: #2f2f2f; }
+    .dropdown-remove-btn {
+        padding: 9px 12px;
+        background: none;
+        border: none;
+        color: #666;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+    }
+    .dropdown-remove-btn:hover { color: #fff; }
+
+    /* ---- Favorites nav badge ---- */
+    .fav-count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #f0c040;
+        color: #000;
+        font-size: 10px;
+        font-weight: 700;
+        border-radius: 10px;
+        padding: 1px 5px;
+        margin-left: 4px;
+    }
+
+    /* ---- Favorites section ---- */
+    .favorites-section { padding: 16px; }
+    .favorites-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    .favorites-header h2 { margin: 0; font-size: 18px; }
+    .fav-header-count { color: #aaa; font-size: 14px; }
+
+    .no-favorites {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 60px 20px;
+        color: #aaa;
+        gap: 8px;
+    }
+    .no-fav-hint { font-size: 13px; color: #666; }
+
+    .fav-remove-btn {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        border: none;
+        background: rgba(0,0,0,0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+    .video-card:hover .fav-remove-btn { opacity: 1; }
 </style>

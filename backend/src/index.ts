@@ -3647,6 +3647,33 @@ app.post('/api/videos/:id/visibility', async (c) => {
     }
 });
 
+// Report video as not found (public, no auth required)
+// Auto-hides video after 3 reports
+app.post('/api/videos/:id/not-found', async (c) => {
+    const videoId = c.req.param('id');
+    try {
+        await c.env.DB.prepare(
+            'UPDATE videos SET not_found_count = not_found_count + 1 WHERE id = ?'
+        ).bind(videoId).run();
+
+        const row = await c.env.DB.prepare(
+            'SELECT id, not_found_count, is_visible FROM videos WHERE id = ?'
+        ).bind(videoId).first<{ id: number; not_found_count: number; is_visible: number }>();
+
+        if (!row) return c.json({ error: 'Video not found' }, 404);
+
+        let autoHidden = false;
+        if (row.not_found_count >= 3 && row.is_visible === 1) {
+            await c.env.DB.prepare('UPDATE videos SET is_visible = 0 WHERE id = ?').bind(videoId).run();
+            autoHidden = true;
+        }
+
+        return c.json({ success: true, auto_hidden: autoHidden, count: row.not_found_count });
+    } catch (e) {
+        return c.json({ error: 'Failed to report' }, 500);
+    }
+});
+
 // Get import logs for all videos (admin only)
 app.get('/api/import-logs', async (c) => {
     const user = c.get('user');
