@@ -114,18 +114,28 @@
         // Single aggregated fetch - replaces 40+ sequential requests
         const headers = getPublicApiHeaders();
         try {
-            // If viewing a specific playlist, we still need a separate fetch for its videos
+            // Parallel fetches: home data + (if category URL) fresh category data + (if playlist URL) playlist videos
+            const fetchTasks: Promise<Response | null>[] = [
+                fetch(`${API_BASE}/home`, { headers }),
+                urlCategoryId ? fetch(`${API_BASE}/videos?category_id=${urlCategoryId}&limit=500`, { headers }) : Promise.resolve(null),
+                urlPlaylistId ? fetch(`${API_BASE}/videos?playlist_id=${urlPlaylistId}`, { headers }) : Promise.resolve(null),
+            ];
+            const [homeResRaw, catResRaw, plResRaw] = await Promise.all(fetchTasks);
+
             let playlistVideos: any[] | null = null;
-            if (urlPlaylistId) {
-                const plVidRes = await fetch(`${API_BASE}/videos?playlist_id=${urlPlaylistId}`, { headers });
-                if (plVidRes.ok) {
-                    const plVidData = await plVidRes.json();
-                    playlistVideos = Array.isArray(plVidData) ? plVidData : plVidData.items || [];
-                }
+            if (urlPlaylistId && plResRaw && plResRaw.ok) {
+                const plVidData = await plResRaw.json();
+                playlistVideos = Array.isArray(plVidData) ? plVidData : plVidData.items || [];
             }
 
-            // One request for everything: categories, videos, channel playlists, curated playlists
-            const homeRes = await fetch(`${API_BASE}/home`, { headers });
+            // Fresh category data bypasses 5-min edge cache on /home
+            let freshCategoryVideos: any[] | null = null;
+            if (urlCategoryId && catResRaw && catResRaw.ok) {
+                const catData = await catResRaw.json();
+                freshCategoryVideos = catData.items || [];
+            }
+
+            const homeRes = homeResRaw!;
             if (!homeRes.ok) throw new Error('Failed to load home data');
             const homeData = await homeRes.json();
 
@@ -220,14 +230,18 @@
                     v.channel_id === channelId && !v.category_id
                 );
             }
-            // If category_id from URL is specified, filter videos by category
+            // If category_id from URL is specified, use fresh direct fetch (bypasses home cache)
             else if (urlCategoryId) {
-                regularVideos = regularVideos.filter((v: any) =>
-                    v.category_id === urlCategoryId
-                );
-                shortsVideos = shortsVideos.filter((v: any) =>
-                    v.category_id === urlCategoryId
-                );
+                if (freshCategoryVideos) {
+                    const ytOnly = freshCategoryVideos.filter((v: any) => !v.source_type || v.source_type === 'youtube');
+                    regularVideos = ytOnly.filter((v: any) => v.is_short !== 1 && v.is_short !== true)
+                        .sort((a: any, b: any) => (a.display_order ?? 999999) - (b.display_order ?? 999999));
+                    shortsVideos = ytOnly.filter((v: any) => v.is_short === 1 || v.is_short === true)
+                        .sort((a: any, b: any) => (a.display_order ?? 999999) - (b.display_order ?? 999999));
+                } else {
+                    regularVideos = regularVideos.filter((v: any) => v.category_id === urlCategoryId);
+                    shortsVideos = shortsVideos.filter((v: any) => v.category_id === urlCategoryId);
+                }
             }
             // If playlist_id from URL is specified, videos are already filtered from API
             // No additional filtering needed as allVideos was set from playlist API response
@@ -692,6 +706,16 @@
         <!-- Sidebar -->
         <aside class="yt-sidebar" class:collapsed={!sidebarOpen} class:hidden={channelId !== null || urlCategoryId !== null || urlPlaylistId !== null}>
             <nav class="sidebar-nav">
+                <a class="nav-item" class:active={activeTab === 'favorites'} href="/youtube?view=favorites">
+                    <svg viewBox="0 0 24 24" width="24" height="24">
+                        {#if activeTab === 'favorites' || currentFavorites.length > 0}
+                            <path fill="#f0c040" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                        {:else}
+                            <path fill="currentColor" d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>
+                        {/if}
+                    </svg>
+                    <span>Favorites {#if currentFavorites.length > 0}<span class="fav-count">{currentFavorites.length}</span>{/if}</span>
+                </a>
                 <button class="nav-item" class:active={activeTab === "home" && !channelId} on:click={goHome}>
                     <svg viewBox="0 0 24 24" width="24" height="24">
                         <path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
@@ -730,16 +754,6 @@
                         </svg>
                         <span>Categories</span>
                     </button>
-                    <a class="nav-item" class:active={activeTab === 'favorites'} href="/youtube?view=favorites">
-                        <svg viewBox="0 0 24 24" width="24" height="24">
-                            {#if activeTab === 'favorites' || currentFavorites.length > 0}
-                                <path fill="#f0c040" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
-                            {:else}
-                                <path fill="currentColor" d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>
-                            {/if}
-                        </svg>
-                        <span>Favorites {#if currentFavorites.length > 0}<span class="fav-count">{currentFavorites.length}</span>{/if}</span>
-                    </a>
                 {/if}
             </nav>
         </aside>

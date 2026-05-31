@@ -1,6 +1,9 @@
 <script>
     import { onMount } from "svelte";
-    import { videos, categories, playlists, API_BASE } from "../../lib/stores";
+    import { videos, playlists, API_BASE } from "../../lib/stores";
+
+    // Local admin categories - independent of shared store (which gets reset by refreshData)
+    let adminCategories = [];
 
     let videoUrls = "";
     let selectedCategory = "";
@@ -69,17 +72,32 @@
     let totalAllVideos = 0;
 
     onMount(async () => {
-        await loadTenants();
+        await Promise.all([loadTenants(), loadAdminCategories()]);
         await loadTotalCount();
     });
+
+    // Load all categories for admin into local variable (bypasses shared store + tenant filter)
+    async function loadAdminCategories() {
+        try {
+            const headers = { "Content-Type": "application/json" };
+            const t = localStorage.getItem("token");
+            if (t) headers["Authorization"] = `Bearer ${t}`;
+            const res = await fetch(`${API_BASE}/categories?all_tenants=1`, { headers });
+            if (res.ok) {
+                adminCategories = await res.json();
+            }
+        } catch (e) {
+            console.error("Failed to load categories", e);
+        }
+    }
 
     async function loadTotalCount() {
         try {
             const headers = { "Content-Type": "application/json" };
-            const token = localStorage.getItem("token");
-            if (token) headers["Authorization"] = `Bearer ${token}`;
-
-            const res = await fetch(`${API_BASE}/videos?limit=1`, { headers });
+            const t = localStorage.getItem("token");
+            if (t) headers["Authorization"] = `Bearer ${t}`;
+            // exclude_imported=1 to match the video list count
+            const res = await fetch(`${API_BASE}/videos?limit=1&exclude_imported=1`, { headers });
             if (res.ok) {
                 const data = await res.json();
                 totalAllVideos = data.total || 0;
@@ -172,7 +190,7 @@
                         ? {
                               ...v,
                               category_id: newCatId,
-                              category_name: $categories.find(
+                              category_name: adminCategories.find(
                                   (c) => c.id == newCatId,
                               )?.name,
                           }
@@ -376,69 +394,52 @@
         if (e.key === "Escape") cancelEdit();
     }
 
-    // DND
-    let draggedItem = null;
-    let dragOverItem = null;
+    // Position input state (maps video.id -> current input string value)
+    let positionInputValues = {};
 
-    function handleDragStart(e, item) {
-        draggedItem = item;
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", JSON.stringify(item));
-        setTimeout(() => e.target.classList.add("dragging"), 0);
+    $: {
+        const newVals = {};
+        $videos.forEach((v, idx) => { newVals[v.id] = String(idx + 1); });
+        positionInputValues = newVals;
     }
 
-    function handleDragEnd(e) {
-        if (e.target) e.target.classList.remove("dragging");
-        draggedItem = null;
-        dragOverItem = null;
-    }
-
-    function handleDragOver(e, item) {
-        e.preventDefault();
-        if (draggedItem === item) return;
-        dragOverItem = item;
-    }
-
-    async function handleDrop(e, targetItem) {
-        e.preventDefault();
-        if (!draggedItem || draggedItem === targetItem) return;
-
-        // Only allow reordering if we are in a specific category view
-        if (!filterCategory) return;
+    async function handlePositionSave(video, newPosStr) {
+        const newPos = parseInt(newPosStr);
+        if (isNaN(newPos) || newPos < 1) return;
 
         const all = [...$videos];
-        const fromIndex = all.indexOf(draggedItem);
-        const toIndex = all.indexOf(targetItem);
+        const fromIndex = all.findIndex(v => v.id === video.id);
+        if (fromIndex < 0) return;
 
-        if (fromIndex < 0 || toIndex < 0) return;
+        const toIndex = Math.min(newPos - 1, all.length - 1);
+        if (fromIndex === toIndex) return;
 
         all.splice(fromIndex, 1);
-        all.splice(toIndex, 0, draggedItem);
+        all.splice(toIndex, 0, video);
 
         videos.set(all);
         await saveOrder(all);
-        draggedItem = null;
-        dragOverItem = null;
+        showNotification(`Moved to position ${toIndex + 1}`);
     }
 
     async function saveOrder(items) {
-        // If the backend doesn't support video reordering yet, this might 404 or fail,
-        // but it prevents the frontend crash.
-        // Assuming there is a /api/videos/reorder or similar, OR we just ignore for now
-        // until backend support is confirmed.
-        // I will implement a safe dummy fetch or actual attempt if I recalled correctly.
-        // Looking at previous 'reorder' mentions, it was for categories/playlists.
-        // I'll comment out the fetch to be safe but keep the function to satisfy the call.
-        /*
-        const payload = items.map((v, idx) => ({
-            id: v.id,
-            display_order: idx
-        }));
-        await fetch(`${API_BASE}/videos/reorder`, {
-            method: "POST",
-            body: JSON.stringify(payload)
-        });
-        */
+        try {
+            const baseOffset = (currentPage - 1) * 50;
+            const payload = items.map((v, idx) => ({
+                id: v.id,
+                display_order: baseOffset + idx
+            }));
+            await fetch(`${API_BASE}/videos/reorder`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${localStorage.getItem("token")}`,
+                },
+                body: JSON.stringify(payload),
+            });
+        } catch (e) {
+            showNotification("Failed to save order", "error");
+        }
     }
 </script>
 
@@ -467,7 +468,7 @@
             </div>
             <select bind:value={selectedCategory}>
                 <option value="">Select Category</option>
-                {#each $categories as c}
+                {#each adminCategories as c}
                     <option value={c.id}>{c.name}</option>
                 {/each}
             </select>
@@ -524,7 +525,7 @@
             >
                 <option value="">All Categories</option>
                 <option value="uncategorized">Uncategorized</option>
-                {#each $categories as c}
+                {#each adminCategories as c}
                     <option value={c.id}>{c.name}</option>
                 {/each}
             </select>
@@ -574,20 +575,27 @@
                     (v.thumbnail_url && !v.thumbnail_url.startsWith("http")
                         ? v.thumbnail_url
                         : "youtube")}
-                <div
-                    class="item"
-                    draggable={filterCategory &&
-                        filterCategory !== "uncategorized"}
-                    on:dragstart={(e) => handleDragStart(e, v)}
-                    on:dragend={handleDragEnd}
-                    on:dragover={(e) => handleDragOver(e, v)}
-                    on:drop={(e) => handleDrop(e, v)}
-                    class:draggable={filterCategory &&
-                        filterCategory !== "uncategorized"}
-                >
+                <div class="item">
                     <div class="info">
                         {#if filterCategory && filterCategory !== "uncategorized"}
-                            <div class="drag-handle">⋮⋮</div>
+                            <input
+                                type="number"
+                                class="position-input"
+                                value={positionInputValues[v.id] || ''}
+                                min="1"
+                                max={$videos.length}
+                                title="Enter position to reorder within this category"
+                                on:focus={(e) => e.target.select()}
+                                on:input={(e) => positionInputValues[v.id] = e.target.value}
+                                on:blur={(e) => handlePositionSave(v, e.target.value)}
+                                on:keydown={(e) => {
+                                    if (e.key === 'Enter') e.target.blur();
+                                    if (e.key === 'Escape') {
+                                        positionInputValues[v.id] = String($videos.findIndex(x => x.id === v.id) + 1);
+                                        e.target.blur();
+                                    }
+                                }}
+                            />
                         {/if}
                         {#if sType === "youtube"}
                             <img
@@ -661,7 +669,7 @@
                                         changeVideoCategory(v, e.target.value)}
                                 >
                                     <option value="">Uncategorized</option>
-                                    {#each $categories as c}
+                                    {#each adminCategories as c}
                                         <option value={c.id}>{c.name}</option>
                                     {/each}
                                 </select>
@@ -989,32 +997,35 @@
         border-bottom: none;
     }
 
-    .item.dragging {
-        opacity: 0.5;
-        border: 2px dashed var(--admin-primary);
-        background: var(--admin-primary-light);
+    .position-input {
+        width: 52px;
+        padding: 4px 6px;
+        border: 1px solid var(--admin-border);
+        border-radius: var(--radius-sm);
+        font-size: 0.8rem;
+        text-align: center;
+        color: var(--admin-text);
+        background: var(--admin-bg);
+        flex-shrink: 0;
+        transition: all var(--transition-fast);
+        -moz-appearance: textfield;
     }
 
-    .draggable {
-        cursor: grab;
-    }
-
-    .draggable:active {
-        cursor: grabbing;
-    }
-
-    .drag-handle {
-        cursor: grab;
-        color: var(--admin-text-light);
-        margin-right: var(--space-md);
-        font-size: 1.2rem;
-        user-select: none;
-        opacity: 0.5;
-        transition: opacity var(--transition-fast);
-    }
-
-    .item:hover .drag-handle {
+    .position-input::-webkit-inner-spin-button,
+    .position-input::-webkit-outer-spin-button {
         opacity: 1;
+    }
+
+    .position-input:hover {
+        border-color: var(--admin-primary);
+        background: white;
+    }
+
+    .position-input:focus {
+        outline: none;
+        border-color: var(--admin-primary);
+        background: white;
+        box-shadow: 0 0 0 2px var(--admin-primary-light);
     }
 
     .info {
