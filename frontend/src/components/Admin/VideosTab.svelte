@@ -67,6 +67,7 @@
     let totalPages = 1;
     let totalVideos = 0;
     let isLoading = false;
+    let pageSize = 50; // 50 | 100 | 200 | 0 (all)
 
     // Total count of ALL videos in DB (not filtered)
     let totalAllVideos = 0;
@@ -112,8 +113,13 @@
     if (initialParams.get("page"))
         currentPage = parseInt(initialParams.get("page") || "1");
 
-    // Watch filters and fetch
+    // Watch filters and fetch (called explicitly - Svelte 5 reactive $: unreliable with bind:value)
     $: fetchFiltered(filterCategory, filterPlaylist, filterTenant, filterVisibility, currentPage);
+
+    function applyFilters() {
+        currentPage = 1;
+        fetchFiltered(filterCategory, filterPlaylist, filterTenant, filterVisibility, 1);
+    }
 
     async function fetchFiltered(cat, pl, tenant, visibility, page) {
         isLoading = true;
@@ -124,7 +130,7 @@
         if (visibility === "visible") params.append("is_visible", "1");
         if (visibility === "hidden") params.append("is_visible", "0");
         params.append("page", page.toString());
-        params.append("limit", "50");
+        params.append("limit", pageSize > 0 ? pageSize.toString() : "9999");
         // Exclude videos from imported channels (they're managed in PlaylistsTab)
         params.append("exclude_imported", "1");
 
@@ -165,6 +171,7 @@
     function handlePageChange(newPage) {
         if (newPage >= 1 && newPage <= totalPages) {
             currentPage = newPage;
+            fetchFiltered(filterCategory, filterPlaylist, filterTenant, filterVisibility, newPage);
             window.scrollTo({ top: 0, behavior: "smooth" });
         }
     }
@@ -394,37 +401,37 @@
         if (e.key === "Escape") cancelEdit();
     }
 
-    // Position input state (maps video.id -> current input string value)
-    let positionInputValues = {};
-
-    $: {
-        const newVals = {};
-        $videos.forEach((v, idx) => { newVals[v.id] = String(idx + 1); });
-        positionInputValues = newVals;
-    }
-
     async function handlePositionSave(video, newPosStr) {
-        const newPos = parseInt(newPosStr);
-        if (isNaN(newPos) || newPos < 1) return;
+        const newPosGlobal = parseInt(newPosStr);
+        if (isNaN(newPosGlobal) || newPosGlobal < 1) return;
 
-        const all = [...$videos];
-        const fromIndex = all.findIndex(v => v.id === video.id);
+        // Get current list from store
+        let currentList;
+        const unsub = videos.subscribe(v => { currentList = v; });
+        unsub();
+
+        const fromIndex = currentList.findIndex(v => v.id === video.id);
         if (fromIndex < 0) return;
 
-        const toIndex = Math.min(newPos - 1, all.length - 1);
+        // Convert global position to 0-based index within current page
+        const pageOffset = pageSize > 0 ? (currentPage - 1) * pageSize : 0;
+        const toIndex = Math.min(Math.max(0, newPosGlobal - pageOffset - 1), currentList.length - 1);
         if (fromIndex === toIndex) return;
 
-        all.splice(fromIndex, 1);
-        all.splice(toIndex, 0, video);
+        const reordered = [...currentList];
+        reordered.splice(fromIndex, 1);
+        reordered.splice(toIndex, 0, video);
 
-        videos.set(all);
-        await saveOrder(all);
-        showNotification(`Moved to position ${toIndex + 1}`);
+        videos.set(reordered);
+        await saveOrder(reordered);
+        showNotification(`Moved to position ${pageOffset + toIndex + 1}`);
+        // Re-fetch to confirm order from DB
+        await fetchFiltered(filterCategory, filterPlaylist, filterTenant, filterVisibility, currentPage);
     }
 
     async function saveOrder(items) {
         try {
-            const baseOffset = (currentPage - 1) * 50;
+            const baseOffset = pageSize > 0 ? (currentPage - 1) * pageSize : 0;
             const payload = items.map((v, idx) => ({
                 id: v.id,
                 display_order: baseOffset + idx
@@ -520,8 +527,18 @@
         <h2>Imported Videos <span class="filtered-count">({totalVideos} shown)</span></h2>
         <div class="filters">
             <select
+                bind:value={pageSize}
+                on:change={() => { currentPage = 1; fetchFiltered(filterCategory, filterPlaylist, filterTenant, filterVisibility, 1); }}
+                title="Videos per page"
+            >
+                <option value={50}>50 per page</option>
+                <option value={100}>100 per page</option>
+                <option value={200}>200 per page</option>
+                <option value={0}>All videos</option>
+            </select>
+            <select
                 bind:value={filterCategory}
-                on:change={() => handlePageChange(1)}
+                on:change={applyFilters}
             >
                 <option value="">All Categories</option>
                 <option value="uncategorized">Uncategorized</option>
@@ -531,7 +548,7 @@
             </select>
             <select
                 bind:value={filterPlaylist}
-                on:change={() => handlePageChange(1)}
+                on:change={applyFilters}
             >
                 <option value="">All Playlists</option>
                 {#each $playlists as p}
@@ -540,7 +557,7 @@
             </select>
             <select
                 bind:value={filterTenant}
-                on:change={() => handlePageChange(1)}
+                on:change={applyFilters}
             >
                 <option value="">All Subdomains</option>
                 <option value="0">Global Only</option>
@@ -550,7 +567,7 @@
             </select>
             <select
                 bind:value={filterVisibility}
-                on:change={() => handlePageChange(1)}
+                on:change={applyFilters}
             >
                 <option value="">All Videos</option>
                 <option value="visible">Visible Only</option>
@@ -563,12 +580,6 @@
         <div class="empty">No videos found.</div>
     {:else}
         <div class="list">
-            <details
-                style="margin-bottom: 10px; font-size: 12px; border: 1px solid #ccc; padding: 5px;"
-            >
-                <summary>Debug Data (${$videos.length} items)</summary>
-                <pre>{JSON.stringify($videos, null, 2)}</pre>
-            </details>
             {#each $videos as v (v.id)}
                 {@const sType =
                     v.source_type ||
@@ -581,20 +592,12 @@
                             <input
                                 type="number"
                                 class="position-input"
-                                value={positionInputValues[v.id] || ''}
-                                min="1"
-                                max={$videos.length}
-                                title="Enter position to reorder within this category"
+                                value={(currentPage - 1) * pageSize + $videos.indexOf(v) + 1}
+                                min={(currentPage - 1) * pageSize + 1}
+                                max={(currentPage - 1) * pageSize + $videos.length}
+                                title="Global position — Enter to reorder"
                                 on:focus={(e) => e.target.select()}
-                                on:input={(e) => positionInputValues[v.id] = e.target.value}
-                                on:blur={(e) => handlePositionSave(v, e.target.value)}
-                                on:keydown={(e) => {
-                                    if (e.key === 'Enter') e.target.blur();
-                                    if (e.key === 'Escape') {
-                                        positionInputValues[v.id] = String($videos.findIndex(x => x.id === v.id) + 1);
-                                        e.target.blur();
-                                    }
-                                }}
+                                on:change={(e) => handlePositionSave(v, e.target.value)}
                             />
                         {/if}
                         {#if sType === "youtube"}
@@ -695,6 +698,7 @@
             {/each}
         </div>
 
+        {#if pageSize > 0 && totalPages > 1}
         <div class="pagination">
             <button
                 on:click={() => handlePageChange(currentPage - 1)}
@@ -706,6 +710,7 @@
                 disabled={currentPage === totalPages}>Next</button
             >
         </div>
+        {/if}
     {/if}
 </div>
 
